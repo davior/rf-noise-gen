@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "session": {
+    "name": "sample",
+    "device": "mock",
+    "device_options": {
+      "verbose": true
+    },
+    "ranges": [
+      {
+        "lower_hz": 100000,
+        "upper_hz": 200000,
+        "max_bandwidth_hz": 10000
+      },
+      {
+        "lower_hz": 88000000,
+        "upper_hz": 108000000,
+        "max_bandwidth_hz": null
+      },
+      {
+        "lower_hz": 433000000,
+        "upper_hz": 434000000,
+        "max_bandwidth_hz": 100000
+      }
+    ],
+    "dwell_seconds": 0.25,
+    "overlap": 0.0,
+    "seed": 42
+  }
+}
