@@ -97,3 +97,74 @@ def test_broadcast_accepts_power_dbm():
     dev = MockDevice(verbose=False, sleep=False)
     dev.broadcast(100_000_000, 100_100_000, 0.0, power_dbm=-33.0)
     assert dev.history[-1].power_dbm == -33.0
+
+
+class _FakeSerial:
+    """Minimal stand-in for pyserial.Serial for exercising ``_send``.
+
+    ``echo_per_write`` bytes are queued into ``in_buffer`` on every write to
+    mimic the tinySA shell echoing each command; ``read_until`` must drain them
+    so the buffer never grows without bound. Set ``stall=True`` to make writes
+    raise like a full-buffer write timeout.
+    """
+
+    def __init__(self, echo_per_write=32, stall=False):
+        import serial
+
+        self._serial_mod = serial
+        self.echo_per_write = echo_per_write
+        self.stall = stall
+        self.in_buffer = b""
+        self.writes = []
+        self.closed = False
+
+    def write(self, data):
+        if self.stall:
+            raise self._serial_mod.SerialTimeoutException("write timeout")
+        self.writes.append(data)
+        self.in_buffer += b"x" * self.echo_per_write + b"ch> "
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def read_until(self, expected):
+        idx = self.in_buffer.find(expected)
+        if idx == -1:
+            drained, self.in_buffer = self.in_buffer, b""
+            return drained
+        end = idx + len(expected)
+        drained, self.in_buffer = self.in_buffer[:end], self.in_buffer[end:]
+        return drained
+
+    def close(self):
+        self.closed = True
+
+
+def test_tinysa_drains_responses_so_buffer_does_not_grow():
+    # Regression: unread shell responses used to fill the OS input buffer after
+    # ~126 hops and wedge the next write. Draining must keep the buffer bounded.
+    dev = TinySAUltra(port="/dev/null", mode="sweep")
+    dev._serial = _FakeSerial()
+    for _ in range(500):
+        dev.broadcast(100_000_000, 101_000_000, 0.0)
+    assert len(dev._serial.in_buffer) < 1024  # bounded regardless of hop count
+
+
+def test_tinysa_send_raises_deviceerror_on_write_stall():
+    from rfnoise.devices.base import DeviceError
+
+    dev = TinySAUltra(port="/dev/null", mode="sweep")
+    dev._serial = _FakeSerial(stall=True)
+    with pytest.raises(DeviceError):
+        dev.broadcast(100_000_000, 101_000_000, 0.0)
+
+
+def test_tinysa_close_does_not_raise_when_port_stalled():
+    dev = TinySAUltra(port="/dev/null", mode="sweep")
+    fake = _FakeSerial(stall=True)
+    dev._serial = fake
+    dev._open = True
+    dev.close()  # must not propagate the stalled output-off write
+    assert fake.closed is True
+    assert dev._serial is None
