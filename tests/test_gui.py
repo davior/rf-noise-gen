@@ -171,12 +171,27 @@ def test_run_controller_setup_error_propagates():
 # -- display availability guard -------------------------------------------
 def test_display_available_needs_env_on_linux(monkeypatch):
     monkeypatch.setattr(gui.sys, "platform", "linux")
+    # Pretend any X connection would succeed so we isolate the env-var logic.
+    monkeypatch.setattr(gui, "_can_open_x_display", lambda: True)
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     assert gui.display_available() is False
 
     monkeypatch.setenv("DISPLAY", ":0")
     assert gui.display_available() is True
+
+    # Wayland advertised but no X DISPLAY: still considered available.
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+    assert gui.display_available() is True
+
+
+def test_display_available_x_connection_refused(monkeypatch):
+    """DISPLAY set but the X server refuses the connection -> unavailable."""
+    monkeypatch.setattr(gui.sys, "platform", "linux")
+    monkeypatch.setenv("DISPLAY", ":1")
+    monkeypatch.setattr(gui, "_can_open_x_display", lambda: False)
+    assert gui.display_available() is False
 
 
 def test_display_available_true_on_windows_macos(monkeypatch):

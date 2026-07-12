@@ -315,11 +315,15 @@ class DisplayUnavailableError(RuntimeError):
 
 
 NO_DISPLAY_HINT = (
-    "the GUI needs a graphical display, but none was found "
-    "(DISPLAY / WAYLAND_DISPLAY is unset).\n"
+    "the GUI needs a graphical display, but none could be opened.\n"
     "\n"
-    "  - On a remote/SSH box, reconnect with X forwarding:  ssh -X user@host\n"
-    "  - Otherwise run rfnoise where a desktop session is available.\n"
+    "  - DISPLAY / WAYLAND_DISPLAY may be unset, or the X server may be\n"
+    "    rejecting the connection ('Authorization required').\n"
+    "  - Over SSH, reconnect with X forwarding:  ssh -X user@host\n"
+    "  - On a Wayland desktop, launch from a terminal inside that session so\n"
+    "    DISPLAY and XAUTHORITY are inherited, or point XAUTHORITY at the\n"
+    "    Xwayland cookie, e.g.:\n"
+    "      export XAUTHORITY=$(ls /run/user/$(id -u)/.mutter-Xwaylandauth.* | head -1)\n"
     "\n"
     "No display? Use the text interface instead:\n"
     "  rfnoise ui              # interactive editor\n"
@@ -327,17 +331,58 @@ NO_DISPLAY_HINT = (
 )
 
 
-def display_available() -> bool:
-    """True if a graphical display can plausibly be opened.
-
-    Windows and macOS always have a native window server. On Linux/BSD Dear
-    PyGui's GLFW backend needs either X11 (``DISPLAY``) or Wayland
-    (``WAYLAND_DISPLAY``); with neither set, opening a viewport aborts with raw
-    GLFW errors, so we check up front and fail with guidance instead.
-    """
+def _env_has_display() -> bool:
+    """True if the environment advertises a display server (env-var check only)."""
     if sys.platform.startswith("win") or sys.platform == "darwin":
         return True
     return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
+def _can_open_x_display() -> bool:
+    """Try to actually open the X11 display named by ``$DISPLAY``.
+
+    Dear PyGui's GLFW backend is X11-only and, when the server refuses the
+    connection (missing/short xauth cookie -- 'Authorization required'), it
+    aborts the *process* at the C level (``SIGABRT``), which no Python
+    ``try/except`` can catch. We pre-flight the connection with libX11 so that
+    failure becomes a clean, catchable error instead of a core dump. If libX11
+    cannot be loaded we return ``True`` and let GLFW try.
+    """
+    import ctypes
+    import ctypes.util
+
+    for name in (ctypes.util.find_library("X11"), "libX11.so.6", "libX11.so"):
+        if not name:
+            continue
+        try:
+            x11 = ctypes.CDLL(name)
+        except OSError:
+            continue
+        x11.XOpenDisplay.restype = ctypes.c_void_p
+        x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+        dpy = x11.XOpenDisplay(None)  # None -> use $DISPLAY
+        if dpy:
+            x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+            x11.XCloseDisplay(dpy)
+            return True
+        return False
+    return True  # libX11 unavailable to probe with -- don't block, let GLFW try
+
+
+def display_available() -> bool:
+    """True if a graphical display can actually be opened.
+
+    Windows/macOS always can. On Linux/BSD we need a display server advertised
+    in the environment *and*, when it's X11, an X server that accepts the
+    connection -- otherwise GLFW aborts with raw errors (or a core dump).
+    """
+    if sys.platform.startswith("win") or sys.platform == "darwin":
+        return True
+    if not _env_has_display():
+        return False
+    if os.environ.get("DISPLAY"):
+        return _can_open_x_display()
+    return True  # Wayland-only advertised; GLFW/XWayland will make the attempt
 
 
 def run_gui(session: Optional[Session] = None) -> None:
