@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rfnoise"
+version = "0.1.0"
+description = "Frequency-hopping RF noise generator with a pluggable device abstraction layer"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "rf-noise-gen contributors" }]
+keywords = ["rf", "sdr", "hackrf", "tinysa", "rtl-sdr", "noise", "frequency-hopping"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Communications :: Ham Radio",
+    "Intended Audience :: Science/Research",
+]
+dependencies = []
+
+[project.optional-dependencies]
+hardware = ["pyserial>=3.5"]
+dev = ["pytest>=7.0"]
+
+[project.scripts]
+rfnoise = "rfnoise.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["rfnoise*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
