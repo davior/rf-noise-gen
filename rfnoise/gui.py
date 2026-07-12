@@ -271,6 +271,18 @@ def hop_plot_y(power_dbm: Optional[float]) -> float:
     return NO_POWER_DBM if power_dbm is None else float(power_dbm)
 
 
+def dbm_ticks(lo: float, hi: float, count: int = 6) -> List[Tuple[str, float]]:
+    """Evenly spaced ``(label, dBm)`` ticks spanning ``lo..hi`` for the Y axis.
+
+    Bars are drawn as height-above-floor (see :func:`hop_plot_y` usage in the
+    GUI), so the axis is relabelled with these real dBm values at their shifted
+    positions.
+    """
+    count = max(2, count)
+    step = (hi - lo) / (count - 1)
+    return [(f"{lo + i * step:.0f}", lo + i * step) for i in range(count)]
+
+
 # ---------------------------------------------------------------------------
 # Run controller: engine on a worker thread, HopStatus over a queue
 # ---------------------------------------------------------------------------
@@ -625,19 +637,33 @@ def run_gui(session: Optional[Session] = None) -> None:
     def apply_plot_axes(sess: Session) -> None:
         """Pin the X/Y axes to the session's frequency + strength extents.
 
-        A static spectrum-style view: frequency on X across the ranges, strength
-        on Y. Called at build time and whenever the session changes (run/load).
+        A static spectrum-style bar view: frequency on X across the ranges,
+        strength (dBm) on Y. Bars are drawn as height above the strength floor
+        (ImPlot bars rise from 0), so the Y axis is shifted and relabelled with
+        real dBm values. Called at build and whenever the session changes.
         """
         fx = frequency_extent(sess)
         if fx is not None:
             lo, hi = fx
-            pad = (hi - lo) * 0.03 or 1.0
+            span = hi - lo
+            pad = span * 0.03 or 1.0
             dpg.set_axis_limits("plot_x", lo - pad, hi + pad)
+            state["bar_weight"] = max(span * 0.006, 1.0)
         else:
             dpg.set_axis_limits_auto("plot_x")
+            state["bar_weight"] = 1.0
+
         plo, phi = power_extent(sess)
+        state["y_floor"] = plo  # bar heights are measured up from here
         ppad = (phi - plo) * 0.05 or 1.0
-        dpg.set_axis_limits("plot_y", plo - ppad, phi + ppad)
+        # Shifted space: 0 == plo. Keep the same visible padding as real dBm.
+        dpg.set_axis_limits("plot_y", -ppad, (phi - plo) + ppad)
+        dpg.set_axis_ticks("plot_y",
+                           tuple((lbl, pos - plo) for lbl, pos in dbm_ticks(plo, phi)))
+        for i in range(plot_model.tier_count):
+            series = f"decay_series_{i}"
+            if dpg.does_item_exist(series):
+                dpg.configure_item(series, weight=state["bar_weight"])
 
     # -- per-frame plot + queue drain (UI thread only) -------------------
     def refresh_plot() -> None:
@@ -649,12 +675,14 @@ def run_gui(session: Optional[Session] = None) -> None:
         if latest is not None:
             dpg.set_value("status_text", latest.line())
         now = time.monotonic()
-        # Each tier has a fixed alpha (set once when its theme is built); points
+        floor = state.get("y_floor", 0.0)
+        # Each tier has a fixed alpha (set once when its theme is built); bars
         # migrate between tiers as they age, so we only update series *data*.
+        # y is shifted to a height above the strength floor (bars rise from 0).
         for i, (_alpha, xs, ys) in enumerate(plot_model.tiers(now)):
             series = f"decay_series_{i}"
             if dpg.does_item_exist(series):
-                dpg.set_value(series, [list(xs), list(ys)])
+                dpg.set_value(series, [list(xs), [y - floor for y in ys]])
         # Reflect a worker that stopped on its own (duration/iterations/error).
         if not controller.running and dpg.get_item_label("run_button") == "Stop":
             set_running_ui(False)
@@ -719,20 +747,21 @@ def run_gui(session: Optional[Session] = None) -> None:
                     dpg.add_plot_axis(dpg.mvXAxis, label="frequency (Hz)", tag="plot_x")
                     with dpg.plot_axis(dpg.mvYAxis, label="strength (dBm)",
                                        tag="plot_y"):
-                        for i in range(plot_model.tier_count):
-                            dpg.add_scatter_series([], [], tag=f"decay_series_{i}")
+                        # Dimmest (oldest) tier first so the freshest bars draw
+                        # on top when they overlap at the same frequency.
+                        for i in reversed(range(plot_model.tier_count)):
+                            dpg.add_bar_series([], [], weight=1.0,
+                                               tag=f"decay_series_{i}")
 
-    # Per-tier themes: newest tiers brightest. Alpha is updated each frame via
-    # the marker-fill colour so the whole scatter fades as points age.
+    # Per-tier themes: newest tiers brightest. Each tier has a fixed bar-fill
+    # alpha; bars migrate between tiers as they age, so the column fades.
     for i in range(plot_model.tier_count):
         alpha = int(((plot_model.tier_count - i) / plot_model.tier_count) * 255)
         with dpg.theme(tag=f"decay_theme_{i}") as theme_id:
-            with dpg.theme_component(dpg.mvScatterSeries):
-                dpg.add_theme_color(dpg.mvPlotCol_MarkerFill, (80, 170, 255, alpha),
+            with dpg.theme_component(dpg.mvBarSeries):
+                dpg.add_theme_color(dpg.mvPlotCol_Fill, (80, 170, 255, alpha),
                                     category=dpg.mvThemeCat_Plots)
-                dpg.add_theme_color(dpg.mvPlotCol_MarkerOutline, (80, 170, 255, alpha),
-                                    category=dpg.mvThemeCat_Plots)
-                dpg.add_theme_style(dpg.mvPlotStyleVar_Marker, dpg.mvPlotMarker_Circle,
+                dpg.add_theme_color(dpg.mvPlotCol_Line, (80, 170, 255, alpha),
                                     category=dpg.mvThemeCat_Plots)
         dpg.bind_item_theme(f"decay_series_{i}", theme_id)
 

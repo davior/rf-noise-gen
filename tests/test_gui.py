@@ -155,6 +155,16 @@ def test_hop_plot_y_uses_power_or_baseline():
     assert gui.hop_plot_y(None) == gui.NO_POWER_DBM
 
 
+def test_dbm_ticks_span_endpoints():
+    ticks = gui.dbm_ticks(-70.0, -15.0, count=6)
+    assert len(ticks) == 6
+    assert ticks[0] == ("-70", -70.0)
+    assert ticks[-1] == ("-15", -15.0)
+    # positions are monotonically increasing dBm values
+    positions = [pos for _lbl, pos in ticks]
+    assert positions == sorted(positions)
+
+
 # -- run controller (real engine, mock device, worker thread) --------------
 def _run_session():
     return Session(

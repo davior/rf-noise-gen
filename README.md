@@ -161,10 +161,11 @@ rfnoise gui examples/sample_session.json # open a saved session
 The GUI (built on [Dear PyGui](https://github.com/hoffstadt/DearPyGui)) is a
 third front-end on the same engine as the text `ui` — edit the session on the
 left, hit **Run** to start hopping on a background thread, and watch a live
-status line plus a spectrum-style plot: **frequency on X** (fixed to the
-configured ranges), **strength (dBm) on Y**, with each burst dropping a point
-that fades out over time so the plot shows what's active now. (With no power
-range set, points sit on a single baseline and just show active frequencies.)
+status line plus a spectrum-style **bar graph**: **frequency on X** (fixed to
+the configured ranges), **strength (dBm) on Y**, with each burst raising a
+vertical bar to its level that fades out over time so the plot shows what's
+active now. (With no power range set, bars share one level and just show active
+frequencies.)
 **Save** / **Load** use the same JSON session files as everywhere else. The text
 `ui` remains available and unchanged.
 
