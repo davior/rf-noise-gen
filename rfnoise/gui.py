@@ -27,7 +27,9 @@ on window close.
 
 from __future__ import annotations
 
+import os
 import queue
+import sys
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -308,12 +310,46 @@ class RunController:
 # ---------------------------------------------------------------------------
 # The Dear PyGui window
 # ---------------------------------------------------------------------------
+class DisplayUnavailableError(RuntimeError):
+    """Raised when the GUI cannot open because there is no graphical display."""
+
+
+NO_DISPLAY_HINT = (
+    "the GUI needs a graphical display, but none was found "
+    "(DISPLAY / WAYLAND_DISPLAY is unset).\n"
+    "\n"
+    "  - On a remote/SSH box, reconnect with X forwarding:  ssh -X user@host\n"
+    "  - Otherwise run rfnoise where a desktop session is available.\n"
+    "\n"
+    "No display? Use the text interface instead:\n"
+    "  rfnoise ui              # interactive editor\n"
+    "  rfnoise run <session>   # headless run"
+)
+
+
+def display_available() -> bool:
+    """True if a graphical display can plausibly be opened.
+
+    Windows and macOS always have a native window server. On Linux/BSD Dear
+    PyGui's GLFW backend needs either X11 (``DISPLAY``) or Wayland
+    (``WAYLAND_DISPLAY``); with neither set, opening a viewport aborts with raw
+    GLFW errors, so we check up front and fail with guidance instead.
+    """
+    if sys.platform.startswith("win") or sys.platform == "darwin":
+        return True
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def run_gui(session: Optional[Session] = None) -> None:
     """Launch the graphical editor/runner. Blocks until the window closes.
 
     Importing Dear PyGui is deferred to here so ``import rfnoise.gui`` (and the
-    unit tests above) work without the optional extra installed.
+    unit tests above) work without the optional extra installed. Raises
+    :class:`DisplayUnavailableError` if no graphical display is present.
     """
+    if not display_available():
+        raise DisplayUnavailableError(NO_DISPLAY_HINT)
+
     import dearpygui.dearpygui as dpg
 
     session = session or Session()
@@ -611,9 +647,15 @@ def run_gui(session: Optional[Session] = None) -> None:
 
     dpg.set_frame_callback(1, lambda: None)  # ensure a first frame is scheduled
 
-    dpg.create_viewport(title="rfnoise", width=1000, height=640)
-    dpg.setup_dearpygui()
-    dpg.show_viewport()
+    # DISPLAY can be set yet unusable (broken X forwarding, dead server): GLFW
+    # then aborts here. Turn that into the same actionable message.
+    try:
+        dpg.create_viewport(title="rfnoise", width=1000, height=640)
+        dpg.setup_dearpygui()
+        dpg.show_viewport()
+    except Exception as exc:
+        dpg.destroy_context()
+        raise DisplayUnavailableError(f"{NO_DISPLAY_HINT}\n\n(display error: {exc})") from exc
     dpg.set_primary_window("primary", True)
 
     try:

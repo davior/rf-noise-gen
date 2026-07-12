@@ -168,6 +168,48 @@ def test_run_controller_setup_error_propagates():
     assert not controller.running
 
 
+# -- display availability guard -------------------------------------------
+def test_display_available_needs_env_on_linux(monkeypatch):
+    monkeypatch.setattr(gui.sys, "platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    assert gui.display_available() is False
+
+    monkeypatch.setenv("DISPLAY", ":0")
+    assert gui.display_available() is True
+
+
+def test_display_available_true_on_windows_macos(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    for platform in ("win32", "darwin"):
+        monkeypatch.setattr(gui.sys, "platform", platform)
+        assert gui.display_available() is True
+
+
+def test_run_gui_without_display_raises(monkeypatch):
+    monkeypatch.setattr(gui, "display_available", lambda: False)
+    with pytest.raises(gui.DisplayUnavailableError):
+        gui.run_gui(Session())
+
+
+def test_cli_gui_no_display(monkeypatch, capsys):
+    from rfnoise import cli
+
+    monkeypatch.setattr("importlib.util.find_spec", lambda name: object())
+    # Pretend dearpygui is importable but no display exists.
+    monkeypatch.setattr(gui, "display_available", lambda: False)
+
+    class _Args:
+        session = None
+
+    rc = cli._cmd_gui(_Args())
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "graphical display" in err
+    assert "rfnoise ui" in err
+
+
 # -- CLI wiring: missing optional dependency ------------------------------
 def test_cli_gui_missing_dep(monkeypatch, capsys):
     import importlib.util

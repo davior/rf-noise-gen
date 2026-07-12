@@ -54,8 +54,13 @@ def _cmd_gui(args) -> int:
         )
         return 2
     session = session_store.load(args.session) if args.session else None
-    from .gui import run_gui
-    run_gui(session)
+    from .gui import DisplayUnavailableError, run_gui
+
+    try:
+        run_gui(session)
+    except DisplayUnavailableError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

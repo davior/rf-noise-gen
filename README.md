@@ -166,6 +166,10 @@ frequencies fade out over time so the plot shows what's active now. **Save** /
 **Load** use the same JSON session files as everywhere else. The text `ui`
 remains available and unchanged.
 
+The GUI needs a graphical display. Over SSH, connect with X forwarding
+(`ssh -X`); on a headless box use `rfnoise ui` or `rfnoise run` instead. Without
+a display, `rfnoise gui` prints this guidance rather than a raw GLFW error.
+
 Run a saved session headless:
 
 ```bash
