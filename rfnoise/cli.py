@@ -41,6 +41,29 @@ def _cmd_new(args) -> int:
     return 0
 
 
+def _cmd_gui(args) -> int:
+    # Dear PyGui is an optional extra imported lazily inside rfnoise.gui, so
+    # check it is installed before we get far enough to fail cryptically.
+    import importlib.util
+
+    if importlib.util.find_spec("dearpygui") is None:
+        print(
+            'the GUI needs the optional "gui" extra; install it with:\n'
+            '  pip install -e ".[gui]"',
+            file=sys.stderr,
+        )
+        return 2
+    session = session_store.load(args.session) if args.session else None
+    from .gui import DisplayUnavailableError, run_gui
+
+    try:
+        run_gui(session)
+    except DisplayUnavailableError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    return 0
+
+
 def _cmd_run(args) -> int:
     session = session_store.load(args.session)
     if args.device:
@@ -93,6 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_new = sub.add_parser("new", help="create a new session interactively")
     p_new.set_defaults(func=_cmd_new)
+
+    p_gui = sub.add_parser("gui", help="launch the graphical session editor")
+    p_gui.add_argument("session", nargs="?", help="session file to open")
+    p_gui.set_defaults(func=_cmd_gui)
 
     p_list = sub.add_parser("list-devices", help="show devices and auto max bandwidth")
     p_list.set_defaults(func=_cmd_list_devices)
