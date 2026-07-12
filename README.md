@@ -78,6 +78,7 @@ In a terminal it updates a single line in place; piped/non-TTY output (or
 ```bash
 pip install -e .            # core (pure stdlib, mock + engine + UI)
 pip install -e .[hardware]  # + pyserial for the tinySA driver
+pip install -e .[gui]       # + dearpygui for the graphical editor
 pip install -e .[dev]       # + pytest
 ```
 
@@ -149,6 +150,68 @@ choose a device and its options, set dwell/seed and an optional strength range,
 then **save** to a session file and **run**. Saved sessions live under
 `sessions/` and can be reopened.
 
+Graphical editor (optional, needs the `[gui]` extra):
+
+```bash
+pip install -e .[gui]
+rfnoise gui                              # empty session
+rfnoise gui examples/sample_session.json # open a saved session
+```
+
+The GUI (built on [Dear PyGui](https://github.com/hoffstadt/DearPyGui)) is a
+third front-end on the same engine as the text `ui` — edit the session on the
+left, hit **Run** to start hopping on a background thread, and watch a live
+status line plus a spectrum-style **bar graph**: **frequency on X** (fixed to
+the configured ranges), **strength (dBm) on Y**. Each burst raises a vertical
+bar to its level, which then **sinks toward the floor and fades out** over the
+*plot decay* window (adjustable above the plot, default 10 s) before vanishing.
+(With no power range set, bars share one level and just show active
+frequencies.)
+**Save** / **Load** use the same JSON session files as everywhere else. The text
+`ui` remains available and unchanged.
+
+The GUI needs a graphical display. Over SSH, connect with X forwarding
+(`ssh -X`); on a headless box use `rfnoise ui` or `rfnoise run` instead. Without
+a display, `rfnoise gui` prints this guidance rather than a raw GLFW error.
+
+#### Running the GUI remotely or under code-server
+
+`rfnoise gui` opens a native OpenGL window, so it renders on a real display —
+it **cannot** appear inside a browser-based IDE (VS Code `code-server`, etc.).
+A few setups and their fixes:
+
+- **Different user than the desktop session** (e.g. `code-server` runs as
+  `devuser` but the desktop is user `gecko`). The GUI needs access to the
+  desktop user's X cookie. Share it once:
+
+  ```bash
+  # as the desktop user (gecko), in a desktop terminal:
+  xauth extract /tmp/xauth-share :1     # :1 = that session's DISPLAY
+  chmod a+r /tmp/xauth-share
+
+  # as the other user (devuser):
+  export DISPLAY=:1
+  export XAUTHORITY=/tmp/xauth-share
+  rfnoise gui                           # window opens on the physical screen
+  ```
+
+  The window still appears on the desktop user's monitor — this only grants
+  access, it does not move pixels into a browser. Delete `/tmp/xauth-share`
+  when done.
+
+- **Remote, and you want the GUI in a browser tab.** Use
+  [Xpra](https://github.com/Xpra-org/xpra)'s HTML5 client, which runs the app in
+  its own headless X server and serves just that window over HTTP:
+
+  ```bash
+  xpra start --start="rfnoise gui" \
+       --bind-tcp=0.0.0.0:14500 --html=on --exit-with-children=yes
+  # then open http://<host>:14500/ in your browser
+  ```
+
+- **No display at all.** Use the text UI — same engine, no window:
+  `rfnoise ui` (interactive editor) or `rfnoise run <session>`.
+
 Run a saved session headless:
 
 ```bash
@@ -189,6 +252,7 @@ rfnoise/
   status.py      live/log run-status reporters (HopStatus)
   session.py     versioned JSON load/save
   interactive.py menu-driven session editor
+  gui.py         Dear PyGui graphical editor (optional [gui] extra)
   cli.py         command-line entry point
 ```
 
