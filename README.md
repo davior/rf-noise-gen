@@ -78,6 +78,7 @@ In a terminal it updates a single line in place; piped/non-TTY output (or
 ```bash
 pip install -e .            # core (pure stdlib, mock + engine + UI)
 pip install -e .[hardware]  # + pyserial for the tinySA driver
+pip install -e .[gui]       # + dearpygui for the graphical editor
 pip install -e .[dev]       # + pytest
 ```
 
@@ -149,6 +150,22 @@ choose a device and its options, set dwell/seed and an optional strength range,
 then **save** to a session file and **run**. Saved sessions live under
 `sessions/` and can be reopened.
 
+Graphical editor (optional, needs the `[gui]` extra):
+
+```bash
+pip install -e .[gui]
+rfnoise gui                              # empty session
+rfnoise gui examples/sample_session.json # open a saved session
+```
+
+The GUI (built on [Dear PyGui](https://github.com/hoffstadt/DearPyGui)) is a
+third front-end on the same engine as the text `ui` — edit the session on the
+left, hit **Run** to start hopping on a background thread, and watch a live
+status line plus a plot of the frequencies currently playing. Recently-played
+frequencies fade out over time so the plot shows what's active now. **Save** /
+**Load** use the same JSON session files as everywhere else. The text `ui`
+remains available and unchanged.
+
 Run a saved session headless:
 
 ```bash
@@ -189,6 +206,7 @@ rfnoise/
   status.py      live/log run-status reporters (HopStatus)
   session.py     versioned JSON load/save
   interactive.py menu-driven session editor
+  gui.py         Dear PyGui graphical editor (optional [gui] extra)
   cli.py         command-line entry point
 ```
 
