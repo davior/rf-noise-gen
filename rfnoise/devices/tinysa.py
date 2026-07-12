@@ -42,6 +42,16 @@ _COMMANDS = {
 POWER_MIN_DBM = -110.0
 POWER_MAX_DBM = -20.0
 
+# The tinySA shell echoes each command and prints this prompt when it is ready
+# for the next one. We read up to it after every command so the OS input buffer
+# never fills (see ``_drain``). Kept as bytes since we compare against raw reads.
+_PROMPT = b"ch> "
+
+# Seconds a single serial write may block before we treat the port as stalled.
+# Without this the pyserial default (``None``) lets a full-buffer write hang
+# forever instead of raising.
+_WRITE_TIMEOUT_S = 2.0
+
 
 def _mode_for(hz: int) -> str:
     if hz <= 800_000_000:
@@ -104,14 +114,20 @@ class TinySAUltra(RFDevice):
             raise DeviceError(
                 "tinySA requires pyserial (pip install rfnoise[hardware])"
             ) from exc
-        self._serial = serial.Serial(self.port, self.baudrate, timeout=1)
+        self._serial = serial.Serial(
+            self.port, self.baudrate, timeout=1, write_timeout=_WRITE_TIMEOUT_S
+        )
         self._set_level(self.level)
         self._send(_COMMANDS["output_on"])
 
     def _on_close(self) -> None:
         if self._serial is not None:
             try:
+                # Best-effort: if the port has already stalled, don't let the
+                # shutdown write hang -- surface nothing and still close the fd.
                 self._send(_COMMANDS["output_off"])
+            except DeviceError:
+                pass
             finally:
                 self._serial.close()
                 self._serial = None
@@ -119,8 +135,35 @@ class TinySAUltra(RFDevice):
     def _send(self, command: str) -> None:
         if self._serial is None:  # pragma: no cover - guarded by open()
             raise DeviceError("tinySA: serial port not open")
-        self._serial.write(command.encode("ascii"))
-        self._serial.flush()
+        try:
+            import serial  # type: ignore
+        except ImportError:  # pragma: no cover - open() already imported it
+            serial = None
+        try:
+            self._serial.write(command.encode("ascii"))
+            self._serial.flush()
+        except Exception as exc:  # SerialTimeoutException et al.
+            if serial is not None and isinstance(exc, serial.SerialException):
+                raise DeviceError(
+                    f"tinySA: serial write stalled/failed ({exc}); "
+                    "the device stopped accepting data."
+                ) from exc
+            raise
+        self._drain()
+
+    def _drain(self) -> None:
+        """Consume the shell's echo/response so the input buffer never fills.
+
+        The tinySA echoes every command and follows it with a ``ch>`` prompt.
+        Nothing here needs that text, but if it is never read the OS input
+        buffer (~4 KB) fills after a hundred-odd hops, back-pressures the port,
+        and the next write blocks forever. Reading up to the prompt after each
+        command keeps the buffer empty; the serial read timeout bounds the wait
+        if a firmware revision omits the prompt.
+        """
+        if self._serial is None:  # pragma: no cover - guarded by callers
+            return
+        self._serial.read_until(_PROMPT)
 
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
                   power_dbm: Optional[float] = None) -> None:
