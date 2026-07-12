@@ -84,6 +84,58 @@ pip install -e .[dev]       # + pytest
 The HackRF driver shells out to `hackrf_transfer` (install the `hackrf`
 system package). RTL-SDR support is receive-only and included for completeness.
 
+## Finding the serial port (tinySA)
+
+The **tinySA Ultra** connects as a USB CDC serial device, so you must tell
+rfnoise which port it is (the interactive editor's *serial port* prompt, or the
+`port` device option). The name differs per OS. The HackRF One does **not** need
+this — `hackrf_transfer` auto-detects the device over USB.
+
+**Cross-platform (recommended).** Once you've installed the `[hardware]` extra
+you get pyserial, which ships a port lister that works everywhere:
+
+```bash
+python -m serial.tools.list_ports -v
+```
+
+Run it with the tinySA unplugged, then again plugged in, and the new entry is
+your device. Look for a USB CDC / "tinySA" description; the first column is the
+port name to use.
+
+**Linux** — the port is usually `/dev/ttyACM0`:
+
+```bash
+ls /dev/ttyACM*          # list candidate ports
+dmesg | tail             # right after plugging in, shows e.g. "ttyACM0"
+```
+
+If opening the port fails with a permission error, add yourself to the serial
+group (`dialout` on Debian/Ubuntu, `uucp` on Arch), then log out and back in:
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
+**macOS** — the port appears as `/dev/cu.usbmodem*` (use the `cu.` name, not
+`tty.`). No driver is needed on modern macOS:
+
+```bash
+ls /dev/cu.usbmodem*
+```
+
+**Windows** — the device shows up as `COMx` (e.g. `COM3`). Find it in
+**Device Manager → Ports (COM & LPT)**, or from PowerShell:
+
+```powershell
+[System.IO.Ports.SerialPort]::GetPortNames()
+# or, with descriptions:
+Get-CimInstance Win32_SerialPort | Select-Object DeviceID, Description
+```
+
+Enter that value (e.g. `COM3`) as the port. Windows 10/11 supply the USB CDC
+driver automatically; if the device shows as unknown, install the tinySA driver
+per its documentation.
+
 ## Usage
 
 Interactive editor (default when run with no arguments):
