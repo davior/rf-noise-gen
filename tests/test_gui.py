@@ -127,6 +127,34 @@ def test_decay_tiers_stable_length():
     assert len(model.tiers(now=0.0)) == 6
 
 
+# -- plot axis extents (frequency vs strength view) ------------------------
+def test_frequency_extent_spans_all_ranges():
+    sess = Session(ranges=[
+        FrequencyRange(433_000_000, 434_000_000),
+        FrequencyRange(100_000, 200_000),
+        FrequencyRange(2_400_000_000, 2_500_000_000),
+    ])
+    assert gui.frequency_extent(sess) == (100_000.0, 2_500_000_000.0)
+
+
+def test_frequency_extent_none_without_ranges():
+    assert gui.frequency_extent(Session(ranges=[])) is None
+
+
+def test_power_extent_uses_session_range():
+    sess = Session(power_min_dbm=-40.0, power_max_dbm=-10.0)
+    assert gui.power_extent(sess) == (-40.0, -10.0)
+
+
+def test_power_extent_defaults_without_range():
+    assert gui.power_extent(Session()) == gui.DEFAULT_DBM_RANGE
+
+
+def test_hop_plot_y_uses_power_or_baseline():
+    assert gui.hop_plot_y(-33.5) == -33.5
+    assert gui.hop_plot_y(None) == gui.NO_POWER_DBM
+
+
 # -- run controller (real engine, mock device, worker thread) --------------
 def _run_session():
     return Session(

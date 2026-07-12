@@ -185,7 +185,8 @@ class DecayPlotModel:
             raise ValueError("tier_count must be >= 1")
         self.decay_window = float(decay_window)
         self.tier_count = int(tier_count)
-        # Each entry: (played_at, x, y). x is hop index, y is center frequency.
+        # Each entry: (played_at, x, y). x/y are plot coordinates -- the GUI uses
+        # x = center frequency (Hz), y = strength (dBm).
         self._points: List[Tuple[float, float, float]] = []
 
     def add(self, x: float, y: float, now: Optional[float] = None) -> None:
@@ -229,6 +230,45 @@ class DecayPlotModel:
 
     def clear(self) -> None:
         self._points.clear()
+
+
+# ---------------------------------------------------------------------------
+# Plot axis extents (pure logic, no Dear PyGui -- unit-testable)
+# ---------------------------------------------------------------------------
+# The live plot is a fixed frequency-vs-strength view: X spans the configured
+# ranges, Y spans the strength range. When a session has no power range every
+# hop's dBm is None, so those points sit on a single baseline.
+DEFAULT_DBM_RANGE: Tuple[float, float] = (-100.0, 10.0)
+NO_POWER_DBM: float = 0.0  # y for hops with no strength info (no power range)
+
+
+def frequency_extent(session: Session) -> Optional[Tuple[float, float]]:
+    """(min lower, max upper) Hz across all ranges for the X axis, or None.
+
+    ``None`` when the session has no ranges yet (the axis stays auto-scaled).
+    """
+    if not session.ranges:
+        return None
+    lo = float(min(r.lower_hz for r in session.ranges))
+    hi = float(max(r.upper_hz for r in session.ranges))
+    if hi <= lo:
+        hi = lo + 1.0
+    return (lo, hi)
+
+
+def power_extent(session: Session) -> Tuple[float, float]:
+    """(min, max) dBm for the Y axis: the session's power range, else a default."""
+    if session.has_power_range:
+        lo, hi = float(session.power_min_dbm), float(session.power_max_dbm)
+        if hi <= lo:
+            hi = lo + 1.0
+        return (lo, hi)
+    return DEFAULT_DBM_RANGE
+
+
+def hop_plot_y(power_dbm: Optional[float]) -> float:
+    """Y coordinate for a hop: its dBm, or the no-strength baseline if unknown."""
+    return NO_POWER_DBM if power_dbm is None else float(power_dbm)
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +442,9 @@ def run_gui(session: Optional[Session] = None) -> None:
     controller = RunController()
     plot_model = DecayPlotModel()
     state: Dict[str, Any] = {"row_ids": [], "device": session.device}
+    # Form values for the initial session -- used to seed the widgets at build
+    # time (name/dwell/seed/power) and populate the range table.
+    _initial_values, _initial_rows = session_to_form(session)
 
     dpg.create_context()
 
@@ -511,6 +554,7 @@ def run_gui(session: Optional[Session] = None) -> None:
         clear_ranges()
         for row in rows:
             add_range_row(row["lower"], row["upper"], row["max_bw"])
+        apply_plot_axes(sess)
 
     # -- run / stop -------------------------------------------------------
     def set_running_ui(running: bool) -> None:
@@ -536,8 +580,10 @@ def run_gui(session: Optional[Session] = None) -> None:
         except Exception as exc:  # pragma: no cover - defensive
             set_status(f"cannot start: {exc}")
             return
+        apply_plot_axes(sess)
         set_running_ui(True)
-        set_status(f"running '{sess.name}' on {sess.device}")
+        note = "" if sess.has_power_range else " (no power range: strength unset)"
+        set_status(f"running '{sess.name}' on {sess.device}{note}")
 
     def on_validate() -> None:
         try:
@@ -550,6 +596,7 @@ def run_gui(session: Optional[Session] = None) -> None:
         except (ConfigurationError, DeviceError, ValueError, Exception) as exc:
             set_status(f"invalid: {exc}")
             return
+        apply_plot_axes(sess)
         preview = gen.plan(min(10, max(1, len(gen.bands))))
         centers = ", ".join(format_freq(b.center_hz) for b in preview[:5])
         set_status(f"OK: {len(gen.bands)} bands. next: {centers} ...")
@@ -575,11 +622,29 @@ def run_gui(session: Optional[Session] = None) -> None:
         populate_from_session(sess)
         set_status(f"loaded {path}")
 
+    def apply_plot_axes(sess: Session) -> None:
+        """Pin the X/Y axes to the session's frequency + strength extents.
+
+        A static spectrum-style view: frequency on X across the ranges, strength
+        on Y. Called at build time and whenever the session changes (run/load).
+        """
+        fx = frequency_extent(sess)
+        if fx is not None:
+            lo, hi = fx
+            pad = (hi - lo) * 0.03 or 1.0
+            dpg.set_axis_limits("plot_x", lo - pad, hi + pad)
+        else:
+            dpg.set_axis_limits_auto("plot_x")
+        plo, phi = power_extent(sess)
+        ppad = (phi - plo) * 0.05 or 1.0
+        dpg.set_axis_limits("plot_y", plo - ppad, phi + ppad)
+
     # -- per-frame plot + queue drain (UI thread only) -------------------
     def refresh_plot() -> None:
         drained = controller.drain()
         for hop in drained:
-            plot_model.add(hop.index, hop.center_hz)
+            # x = center frequency, y = strength (dBm) -- baseline if no power.
+            plot_model.add(hop.center_hz, hop_plot_y(hop.power_dbm))
         latest = drained[-1] if drained else None
         if latest is not None:
             dpg.set_value("status_text", latest.line())
@@ -590,17 +655,11 @@ def run_gui(session: Optional[Session] = None) -> None:
             series = f"decay_series_{i}"
             if dpg.does_item_exist(series):
                 dpg.set_value(series, [list(xs), list(ys)])
-        if xs_ys_present(plot_model):
-            dpg.fit_axis_data("plot_x")
-            dpg.fit_axis_data("plot_y")
         # Reflect a worker that stopped on its own (duration/iterations/error).
         if not controller.running and dpg.get_item_label("run_button") == "Stop":
             set_running_ui(False)
             if controller.error:
                 set_status(f"run error: {controller.error}")
-
-    def xs_ys_present(model: DecayPlotModel) -> bool:
-        return bool(model._points)
 
     # -- build the window -------------------------------------------------
     with dpg.window(tag="primary"):
@@ -620,9 +679,11 @@ def run_gui(session: Optional[Session] = None) -> None:
                                    width=160)
                 with dpg.group(horizontal=True):
                     dpg.add_input_text(label="min dBm", tag="f_power_min",
-                                       default_value="", width=90)
+                                       default_value=_initial_values["power_min"],
+                                       width=90)
                     dpg.add_input_text(label="max dBm", tag="f_power_max",
-                                       default_value="", width=90)
+                                       default_value=_initial_values["power_max"],
+                                       width=90)
 
                 dpg.add_separator()
                 dpg.add_text("Device")
@@ -650,12 +711,13 @@ def run_gui(session: Optional[Session] = None) -> None:
                     dpg.add_button(label="Load",
                                    callback=lambda: dpg.show_item("load_dialog"))
 
-            # Right: live status + fading plot.
+            # Right: live status + fading strength-vs-frequency plot.
             with dpg.child_window(autosize_x=True, autosize_y=True):
                 dpg.add_text("", tag="status_text")
-                with dpg.plot(label="Playing frequencies (fading)", height=-1, width=-1):
-                    dpg.add_plot_axis(dpg.mvXAxis, label="hop", tag="plot_x")
-                    with dpg.plot_axis(dpg.mvYAxis, label="center frequency (Hz)",
+                with dpg.plot(label="Live spectrum -- strength vs frequency (fading)",
+                              height=-1, width=-1):
+                    dpg.add_plot_axis(dpg.mvXAxis, label="frequency (Hz)", tag="plot_x")
+                    with dpg.plot_axis(dpg.mvYAxis, label="strength (dBm)",
                                        tag="plot_y"):
                         for i in range(plot_model.tier_count):
                             dpg.add_scatter_series([], [], tag=f"decay_series_{i}")
@@ -687,8 +749,9 @@ def run_gui(session: Optional[Session] = None) -> None:
 
     # Populate the editor from the initial session (builds option form + rows).
     rebuild_device_options(session.device_options)
-    for row in session_to_form(session)[1]:
+    for row in _initial_rows:
         add_range_row(row["lower"], row["upper"], row["max_bw"])
+    apply_plot_axes(session)
 
     dpg.set_frame_callback(1, lambda: None)  # ensure a first frame is scheduled
 

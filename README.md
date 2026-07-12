@@ -161,10 +161,12 @@ rfnoise gui examples/sample_session.json # open a saved session
 The GUI (built on [Dear PyGui](https://github.com/hoffstadt/DearPyGui)) is a
 third front-end on the same engine as the text `ui` — edit the session on the
 left, hit **Run** to start hopping on a background thread, and watch a live
-status line plus a plot of the frequencies currently playing. Recently-played
-frequencies fade out over time so the plot shows what's active now. **Save** /
-**Load** use the same JSON session files as everywhere else. The text `ui`
-remains available and unchanged.
+status line plus a spectrum-style plot: **frequency on X** (fixed to the
+configured ranges), **strength (dBm) on Y**, with each burst dropping a point
+that fades out over time so the plot shows what's active now. (With no power
+range set, points sit on a single baseline and just show active frequencies.)
+**Save** / **Load** use the same JSON session files as everywhere else. The text
+`ui` remains available and unchanged.
 
 The GUI needs a graphical display. Over SSH, connect with X forwarding
 (`ssh -X`); on a headless box use `rfnoise ui` or `rfnoise run` instead. Without
