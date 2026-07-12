@@ -77,6 +77,53 @@ DEVICE_OPTION_FIELDS: Dict[str, List[Tuple[str, str, str, Any]]] = {
 }
 
 
+# Helper-tooltip text for the main session settings, keyed by widget tag, and
+# for per-device option fields, keyed by their option key. Rendered as hover
+# tooltips on the corresponding labels/inputs in the GUI.
+SETTING_TIPS: Dict[str, str] = {
+    "f_name": "A label for this session. Also used as the default filename "
+              "when you save it.",
+    "f_dwell": "How long the generator stays on each hop before moving to the "
+               "next frequency, in seconds.",
+    "f_overlap": "Fractional overlap between adjacent hop bandwidths "
+                 "(0 = none, 0.5 = 50%). Higher values pack hops closer "
+                 "together for denser coverage.",
+    "f_seed": "Seed for the random hop sequence. Leave blank for a fresh "
+              "random pattern each run; set a value to reproduce the exact "
+              "same sequence.",
+    "f_power_min": "Lower bound of the transmit strength range, in dBm. Leave "
+                   "blank to let the device use its default power.",
+    "f_power_max": "Upper bound of the transmit strength range, in dBm. Leave "
+                   "blank to let the device use its default power.",
+    "f_device": "Which signal device drives the output. The options below "
+                "change to match the selected device.",
+    "f_decay_window": "How long each plotted hop stays visible on the live "
+                      "spectrum before fully fading out, in seconds.",
+}
+
+RANGE_TIPS: Dict[str, str] = {
+    "lower": "Start of this frequency range (e.g. 433M, 5.3GHz).",
+    "upper": "End of this frequency range (e.g. 434M, 5.35GHz).",
+    "maxbw": "Maximum bandwidth per hop within this range. Blank = use the "
+             "device's automatic maximum.",
+}
+
+DEVICE_OPTION_TIPS: Dict[str, str] = {
+    "max_bandwidth_hz": "Largest bandwidth a single hop may occupy, in Hz.",
+    "verbose": "Print detailed per-hop logging to the console.",
+    "port": "Serial port the tinySA is connected to (e.g. /dev/ttyACM0 or "
+            "COM3). Blank = auto-detect.",
+    "mode": "Burst mode: 'sweep' sweeps across the hop bandwidth, 'cw' emits a "
+            "single continuous tone.",
+    "level": "tinySA output level, in dBm.",
+    "baudrate": "Serial connection speed. Match the device's configured baud "
+                "rate.",
+    "txvga_gain": "HackRF transmit VGA gain (0-47). Higher = stronger output.",
+    "amp": "Enable the HackRF's extra TX amplifier stage for more output "
+           "power.",
+}
+
+
 def _parse_optional_int(raw: str) -> Optional[int]:
     """Parse a seed-like field: blank -> None, else an int (raises ValueError)."""
     raw = (raw or "").strip()
@@ -475,6 +522,11 @@ def run_gui(session: Optional[Session] = None) -> None:
     def set_status(msg: str) -> None:
         dpg.set_value("status_text", msg)
 
+    def add_tip(item_tag: str, text: str) -> None:
+        """Attach a hover tooltip with wrapped ``text`` to an existing item."""
+        with dpg.tooltip(parent=item_tag):
+            dpg.add_text(text, wrap=320)
+
     def current_device_options() -> Dict[str, Any]:
         opts: Dict[str, Any] = {}
         for key, _label, kind, _default in DEVICE_OPTION_FIELDS.get(state["device"], []):
@@ -514,9 +566,12 @@ def run_gui(session: Optional[Session] = None) -> None:
         state["row_ids"].append(row_id)
         with dpg.table_row(parent="ranges_table", tag=row_id):
             dpg.add_input_text(tag=f"{row_id}_lower", default_value=lower, width=120)
+            add_tip(f"{row_id}_lower", RANGE_TIPS["lower"])
             dpg.add_input_text(tag=f"{row_id}_upper", default_value=upper, width=120)
+            add_tip(f"{row_id}_upper", RANGE_TIPS["upper"])
             dpg.add_input_text(tag=f"{row_id}_maxbw", default_value=max_bw,
                                hint="auto", width=120)
+            add_tip(f"{row_id}_maxbw", RANGE_TIPS["maxbw"])
             dpg.add_button(label="remove",
                            callback=lambda s, a, u=row_id: remove_range_row(u))
 
@@ -557,6 +612,8 @@ def run_gui(session: Optional[Session] = None) -> None:
             else:  # text
                 dpg.add_input_text(label=label, tag=tag, default_value=str(value),
                                    width=200, parent="devopts_group")
+            if key in DEVICE_OPTION_TIPS:
+                add_tip(tag, DEVICE_OPTION_TIPS[key])
 
     def on_device_change(sender, app_data) -> None:
         state["device"] = app_data
@@ -718,27 +775,34 @@ def run_gui(session: Optional[Session] = None) -> None:
                 dpg.add_text("Session")
                 dpg.add_input_text(label="name", tag="f_name",
                                    default_value=session.name, width=260)
+                add_tip("f_name", SETTING_TIPS["f_name"])
                 dpg.add_input_float(label="dwell (s)", tag="f_dwell",
                                     default_value=session.dwell_seconds,
                                     width=160, step=0)
+                add_tip("f_dwell", SETTING_TIPS["f_dwell"])
                 dpg.add_input_float(label="overlap", tag="f_overlap",
                                     default_value=session.overlap, width=160, step=0)
+                add_tip("f_overlap", SETTING_TIPS["f_overlap"])
                 dpg.add_input_text(label="seed (blank=random)", tag="f_seed",
                                    default_value="" if session.seed is None else str(session.seed),
                                    width=160)
+                add_tip("f_seed", SETTING_TIPS["f_seed"])
                 with dpg.group(horizontal=True):
                     dpg.add_input_text(label="min dBm", tag="f_power_min",
                                        default_value=_initial_values["power_min"],
                                        width=90)
+                    add_tip("f_power_min", SETTING_TIPS["f_power_min"])
                     dpg.add_input_text(label="max dBm", tag="f_power_max",
                                        default_value=_initial_values["power_max"],
                                        width=90)
+                    add_tip("f_power_max", SETTING_TIPS["f_power_max"])
 
                 dpg.add_separator()
                 dpg.add_text("Device")
                 dpg.add_combo(device_keys(), label="device", tag="f_device",
                               default_value=session.device, width=200,
                               callback=on_device_change)
+                add_tip("f_device", SETTING_TIPS["f_device"])
                 dpg.add_group(tag="devopts_group")
 
                 dpg.add_separator()
@@ -769,6 +833,7 @@ def run_gui(session: Optional[Session] = None) -> None:
                                         width=110, step=0.5, format="%.1f",
                                         min_value=0.1, min_clamped=True,
                                         callback=on_decay_change)
+                    add_tip("f_decay_window", SETTING_TIPS["f_decay_window"])
                 dpg.add_text("", tag="status_text")
                 with dpg.plot(label="Live spectrum -- strength vs frequency (fading)",
                               height=-1, width=-1):

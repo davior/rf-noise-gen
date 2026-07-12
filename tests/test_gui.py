@@ -160,6 +160,12 @@ def test_frequency_extent_none_without_ranges():
     assert gui.frequency_extent(Session(ranges=[])) is None
 
 
+def test_every_device_option_has_tooltip():
+    for fields in gui.DEVICE_OPTION_FIELDS.values():
+        for key, _label, _kind, _default in fields:
+            assert key in gui.DEVICE_OPTION_TIPS, f"missing tooltip for {key}"
+
+
 def test_power_extent_uses_session_range():
     sess = Session(power_min_dbm=-40.0, power_max_dbm=-10.0)
     assert gui.power_extent(sess) == (-40.0, -10.0)
