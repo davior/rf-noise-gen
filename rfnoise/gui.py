@@ -186,7 +186,7 @@ class DecayPlotModel:
         self.decay_window = float(decay_window)
         self.tier_count = int(tier_count)
         # Each entry: (played_at, x, y). x/y are plot coordinates -- the GUI uses
-        # x = center frequency (Hz), y = strength (dBm).
+        # x = center frequency (MHz), y = strength (dBm).
         self._points: List[Tuple[float, float, float]] = []
 
     def add(self, x: float, y: float, now: Optional[float] = None) -> None:
@@ -250,6 +250,7 @@ class DecayPlotModel:
 # hop's dBm is None, so those points sit on a single baseline.
 DEFAULT_DBM_RANGE: Tuple[float, float] = (-100.0, 10.0)
 NO_POWER_DBM: float = 0.0  # y for hops with no strength info (no power range)
+HZ_PER_MHZ: float = 1_000_000.0  # X axis is displayed in MHz, not Hz
 
 
 def frequency_extent(session: Session) -> Optional[Tuple[float, float]]:
@@ -663,11 +664,11 @@ def run_gui(session: Optional[Session] = None) -> None:
         """
         fx = frequency_extent(sess)
         if fx is not None:
-            lo, hi = fx
+            lo, hi = fx[0] / HZ_PER_MHZ, fx[1] / HZ_PER_MHZ  # plot X is in MHz
             span = hi - lo
-            pad = span * 0.03 or 1.0
+            pad = span * 0.03 or (1.0 / HZ_PER_MHZ)
             dpg.set_axis_limits("plot_x", lo - pad, hi + pad)
-            state["bar_weight"] = max(span * 0.006, 1.0)
+            state["bar_weight"] = max(span * 0.006, 1.0 / HZ_PER_MHZ)
         else:
             dpg.set_axis_limits_auto("plot_x")
             state["bar_weight"] = 1.0
@@ -689,7 +690,7 @@ def run_gui(session: Optional[Session] = None) -> None:
         drained = controller.drain()
         for hop in drained:
             # x = center frequency, y = strength (dBm) -- baseline if no power.
-            plot_model.add(hop.center_hz, hop_plot_y(hop.power_dbm))
+            plot_model.add(hop.center_hz / HZ_PER_MHZ, hop_plot_y(hop.power_dbm))
         latest = drained[-1] if drained else None
         if latest is not None:
             dpg.set_value("status_text", latest.line())
@@ -771,7 +772,7 @@ def run_gui(session: Optional[Session] = None) -> None:
                 dpg.add_text("", tag="status_text")
                 with dpg.plot(label="Live spectrum -- strength vs frequency (fading)",
                               height=-1, width=-1):
-                    dpg.add_plot_axis(dpg.mvXAxis, label="frequency (Hz)", tag="plot_x")
+                    dpg.add_plot_axis(dpg.mvXAxis, label="frequency (MHz)", tag="plot_x")
                     with dpg.plot_axis(dpg.mvYAxis, label="strength (dBm)",
                                        tag="plot_y"):
                         # Dimmest (oldest) tier first so the freshest bars draw
