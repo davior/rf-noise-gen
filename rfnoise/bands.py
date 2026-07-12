@@ -87,13 +87,19 @@ def build_bands(ranges: Sequence[FrequencyRange], device_max: Optional[int],
 
 
 class RandomBandSelector:
-    """Uniformly selects a band from a fixed pool, with a seedable RNG."""
+    """Uniformly selects a band from a fixed pool.
 
-    def __init__(self, bands: Sequence[Band], seed: Optional[int] = None):
+    Pass ``rng`` to share a single :class:`random.Random` with the engine (so
+    band and power draws come from the same reproducible stream), or ``seed`` to
+    let the selector own its RNG.
+    """
+
+    def __init__(self, bands: Sequence[Band], seed: Optional[int] = None,
+                 rng: Optional[random.Random] = None):
         if not bands:
             raise ValueError("cannot select from an empty band pool")
         self._bands = list(bands)
-        self._rng = random.Random(seed)
+        self._rng = rng if rng is not None else random.Random(seed)
 
     def __len__(self) -> int:
         return len(self._bands)

@@ -12,6 +12,7 @@ from .engine import ConfigurationError, NoiseGenerator
 from .freq import format_freq
 from .interactive import run_interactive
 from .model import Session
+from .status import make_reporter
 
 
 def _cmd_list_devices(args) -> int:
@@ -44,8 +45,6 @@ def _cmd_run(args) -> int:
     session = session_store.load(args.session)
     if args.device:
         session.device = args.device
-        if args.device == "mock":
-            session.device_options.setdefault("verbose", True)
     opts = dict(session.device_options)
     if session.device == "mock":
         opts.setdefault("sleep", not args.dry_run)
@@ -65,10 +64,19 @@ def _cmd_run(args) -> int:
                   f"width {format_freq(band.width_hz)})")
         return 0
 
+    mode = "quiet" if args.quiet else ("log" if args.log else "auto")
+    reporter = make_reporter(mode)
+    power = ""
+    if session.has_power_range:
+        power = f", power {session.power_min_dbm:g}..{session.power_max_dbm:g} dBm"
     print(f"running '{session.name}' on {device.name}: "
-          f"{len(gen.bands)} bands, dwell {session.dwell_seconds}s")
-    hops = gen.run(duration=args.duration, iterations=args.iterations)
-    print(f"stopped after {hops} hops")
+          f"{len(gen.bands)} bands, dwell {session.dwell_seconds}s{power}")
+    reporter.start()
+    import time as _time
+    t0 = _time.monotonic()
+    hops = gen.run(duration=args.duration, iterations=args.iterations,
+                   on_hop=reporter.update)
+    reporter.finish(hops, _time.monotonic() - t0)
     return 0
 
 
@@ -96,6 +104,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--iterations", type=int, help="number of hops")
     p_run.add_argument("--dry-run", action="store_true",
                        help="print the hop schedule without transmitting")
+    p_run.add_argument("--log", action="store_true",
+                       help="print one status line per hop instead of a live line")
+    p_run.add_argument("--quiet", action="store_true",
+                       help="suppress the live run status")
     p_run.set_defaults(func=_cmd_run)
 
     return parser

@@ -88,3 +88,58 @@ def test_duration_bounds_run():
     gen = NoiseGenerator(device, session)
     hops = gen.run(duration=0.05)
     assert hops >= 1
+
+
+def test_on_hop_called_with_status():
+    gen = NoiseGenerator(_mock_device(), _mock_session())
+    seen = []
+    gen.run(iterations=5, on_hop=seen.append)
+    assert len(seen) == 5
+    assert seen[0].index == 1
+    # center matches what the device broadcast
+    assert seen[0].center_hz == gen.device.history[0].center_hz
+
+
+def test_power_drawn_within_session_and_device_range():
+    session = _mock_session(power_min_dbm=-60.0, power_max_dbm=-30.0)
+    device = MockDevice(verbose=False, sleep=False)  # power range (-120, 10)
+    gen = NoiseGenerator(device, session)
+    gen.run(iterations=40)
+    powers = [rec.power_dbm for rec in device.history]
+    assert all(p is not None for p in powers)
+    assert all(-60.0 <= p <= -30.0 for p in powers)
+
+
+def test_power_clamped_to_device_capability():
+    # Session asks for a wider range than the device supports; engine clamps.
+    session = _mock_session(power_min_dbm=-200.0, power_max_dbm=200.0)
+    device = MockDevice(verbose=False, sleep=False, power_range=(-50.0, 0.0))
+    gen = NoiseGenerator(device, session)
+    gen.run(iterations=30)
+    assert all(-50.0 <= rec.power_dbm <= 0.0 for rec in device.history)
+
+
+def test_power_is_reproducible_with_seed():
+    def run_once():
+        session = _mock_session(power_min_dbm=-60.0, power_max_dbm=-30.0, seed=99)
+        device = MockDevice(verbose=False, sleep=False)
+        NoiseGenerator(device, session).run(iterations=10)
+        return [rec.power_dbm for rec in device.history]
+    assert run_once() == run_once()
+
+
+def test_no_power_range_yields_none():
+    gen = NoiseGenerator(_mock_device(), _mock_session())
+    gen.run(iterations=5)
+    assert all(rec.power_dbm is None for rec in gen.device.history)
+
+
+def test_power_range_ignored_when_device_cannot_control(capsys):
+    session = _mock_session(power_min_dbm=-60.0, power_max_dbm=-30.0)
+    device = MockDevice(verbose=False, sleep=False, power_range=None)
+    gen = NoiseGenerator(device, session)
+    assert gen.power_range is None
+    out = capsys.readouterr().out
+    assert "cannot set output level" in out
+    gen.run(iterations=3)
+    assert all(rec.power_dbm is None for rec in device.history)

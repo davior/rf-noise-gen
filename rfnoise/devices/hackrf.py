@@ -27,6 +27,20 @@ from .base import DeviceCapabilities, DeviceError, RFDevice, TxBand
 
 MAX_SAMPLE_RATE = 20_000_000  # 20 Msps -> ~20 MHz instantaneous bandwidth
 
+# The HackRF has no calibrated dBm output, only a 0-47 dB TX VGA gain. We expose
+# a nominal dBm range and map it linearly onto that gain so a session's dBm
+# strength range still works; the absolute dBm is approximate/uncalibrated.
+POWER_MIN_DBM = -50.0
+POWER_MAX_DBM = 5.0
+MAX_TXVGA_GAIN = 47
+
+
+def dbm_to_gain(dbm: float) -> int:
+    """Map a nominal dBm level onto the HackRF TX VGA gain (0-47, clamped)."""
+    span = POWER_MAX_DBM - POWER_MIN_DBM
+    frac = (dbm - POWER_MIN_DBM) / span if span else 0.0
+    return max(0, min(MAX_TXVGA_GAIN, int(round(frac * MAX_TXVGA_GAIN))))
+
 
 def make_noise_samples(count: int, seed: Optional[int] = None) -> bytes:
     """Generate ``count`` interleaved 8-bit signed I/Q noise samples.
@@ -67,6 +81,8 @@ class HackRFOne(RFDevice):
             max_bandwidth_hz=MAX_SAMPLE_RATE,
             default_band_width=MAX_SAMPLE_RATE,
             description="Wideband SDR transceiver, up to 20 MHz instantaneous bandwidth.",
+            power_min_dbm=POWER_MIN_DBM,
+            power_max_dbm=POWER_MAX_DBM,
         )
         self._proc: Optional[subprocess.Popen] = None
 
@@ -82,16 +98,18 @@ class HackRFOne(RFDevice):
                 self._proc.kill()
             self._proc = None
 
-    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float) -> None:
+    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
+                  power_dbm: Optional[float] = None) -> None:
         center = (int(start_hz) + int(stop_hz)) // 2
         width = max(1, int(stop_hz) - int(start_hz))
         sample_rate = min(width, MAX_SAMPLE_RATE)
+        gain = self.txvga_gain if power_dbm is None else dbm_to_gain(power_dbm)
         self._stop_proc()  # retune by restarting the stream
         cmd = [
             self.binary,
             "-f", str(center),
             "-s", str(sample_rate),
-            "-x", str(self.txvga_gain),
+            "-x", str(gain),
             "-a", "1" if self.amp else "0",
             "-t", "-",  # read samples from stdin
         ]

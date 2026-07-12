@@ -34,7 +34,8 @@ class RTLSDR(RFDevice):
             description="Receive-only dongle (RTL2832U); cannot broadcast.",
         )
 
-    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float) -> None:
+    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
+                  power_dbm=None) -> None:
         raise TransmitNotSupported(
             "RTL-SDR is receive-only and cannot transmit RF signals."
         )

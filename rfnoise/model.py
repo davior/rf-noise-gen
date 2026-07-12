@@ -76,6 +76,19 @@ class Session:
     dwell_seconds: float = 0.5
     overlap: float = 0.0  # 0 = sequential bands; 0<overlap<1 = fractional overlap
     seed: Optional[int] = None
+    # Optional random output-level range in dBm; when both are set, each hop
+    # broadcasts at a random level drawn uniformly from [min, max].
+    power_min_dbm: Optional[float] = None
+    power_max_dbm: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.power_min_dbm is not None and self.power_max_dbm is not None:
+            if self.power_max_dbm < self.power_min_dbm:
+                raise ValueError("power_max_dbm must be >= power_min_dbm")
+
+    @property
+    def has_power_range(self) -> bool:
+        return self.power_min_dbm is not None and self.power_max_dbm is not None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -86,6 +99,8 @@ class Session:
             "dwell_seconds": self.dwell_seconds,
             "overlap": self.overlap,
             "seed": self.seed,
+            "power_min_dbm": self.power_min_dbm,
+            "power_max_dbm": self.power_max_dbm,
         }
 
     @classmethod
@@ -98,4 +113,6 @@ class Session:
             dwell_seconds=float(data.get("dwell_seconds", 0.5)),
             overlap=float(data.get("overlap", 0.0)),
             seed=data.get("seed"),
+            power_min_dbm=data.get("power_min_dbm"),
+            power_max_dbm=data.get("power_max_dbm"),
         )

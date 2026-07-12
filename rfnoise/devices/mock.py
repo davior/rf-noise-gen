@@ -20,6 +20,7 @@ class HopRecord:
     start_hz: int
     stop_hz: int
     dwell_s: float
+    power_dbm: Optional[float] = None
 
     @property
     def center_hz(self) -> int:
@@ -36,14 +37,18 @@ class MockDevice(RFDevice):
     Options:
       * ``max_bandwidth_hz`` -- overrideable simulated hardware cap (default
         20 MHz, matching a HackRF-class radio).
-      * ``verbose`` -- print each hop as it happens (default ``True``).
+      * ``verbose`` -- print each hop as it happens (default ``False``; the run
+        status reporter is normally the single source of on-screen output).
       * ``sleep`` -- actually sleep for the dwell time (default ``True``);
         tests set this ``False`` to run instantly.
+      * ``power_range`` -- ``(min_dbm, max_dbm)`` the mock reports it can output,
+        or ``None`` to simulate a device that cannot control level.
     """
 
-    def __init__(self, max_bandwidth_hz: int = 20_000_000, verbose: bool = True,
-                 sleep: bool = True, **options):
+    def __init__(self, max_bandwidth_hz: int = 20_000_000, verbose: bool = False,
+                 sleep: bool = True, power_range=(-120.0, 10.0), **options):
         super().__init__(**options)
+        pmin, pmax = (None, None) if power_range is None else power_range
         self.capabilities = DeviceCapabilities(
             name="Mock Device",
             can_transmit=True,
@@ -51,6 +56,8 @@ class MockDevice(RFDevice):
             max_bandwidth_hz=int(max_bandwidth_hz),
             default_band_width=1_000_000,
             description="Software-only test transmitter (no RF emitted).",
+            power_min_dbm=pmin,
+            power_max_dbm=pmax,
         )
         self.verbose = verbose
         self.sleep = sleep
@@ -64,14 +71,16 @@ class MockDevice(RFDevice):
         if self.verbose:
             print(f"[mock] closed after {len(self.history)} hops")
 
-    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float) -> None:
-        rec = HopRecord(int(start_hz), int(stop_hz), float(dwell_s))
+    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
+                  power_dbm=None) -> None:
+        rec = HopRecord(int(start_hz), int(stop_hz), float(dwell_s), power_dbm)
         self.history.append(rec)
         if self.verbose:
+            level = "" if power_dbm is None else f" @ {power_dbm:.1f} dBm"
             print(
                 f"[mock] TX {format_freq(rec.center_hz):>10} "
                 f"(band {format_freq(rec.start_hz)}-{format_freq(rec.stop_hz)}, "
-                f"width {format_freq(rec.width_hz)}) for {dwell_s:.3f}s"
+                f"width {format_freq(rec.width_hz)}){level} for {dwell_s:.3f}s"
             )
         if self.sleep and dwell_s > 0:
             time.sleep(dwell_s)

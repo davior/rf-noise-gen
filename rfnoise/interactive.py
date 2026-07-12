@@ -15,6 +15,7 @@ from .devices import create_device, device_keys, get_device_class
 from .engine import ConfigurationError, NoiseGenerator, validate
 from .freq import format_freq, parse_freq
 from .model import FrequencyRange, Session
+from .status import make_reporter
 
 
 # -- small input helpers ---------------------------------------------------
@@ -56,7 +57,7 @@ def _confirm(text: str) -> bool:
 def _device_defaults(key: str) -> dict:
     """Sensible default options per device for the interactive editor."""
     if key == "mock":
-        return {"verbose": True}
+        return {}
     if key == "tinysa":
         return {"mode": "sweep", "port": ""}
     if key == "hackrf":
@@ -135,10 +136,26 @@ def _edit_device_options(session: Session) -> None:
     elif key == "hackrf":
         opts["txvga_gain"] = int(_prompt_float("  TX VGA gain (0-47)", opts.get("txvga_gain", 30)))
         opts["amp"] = _confirm("  enable TX amplifier?")
-    elif key == "mock":
-        opts["verbose"] = True
     if key == "rtlsdr":
         print("  note: RTL-SDR is receive-only and cannot run a broadcast session.")
+
+
+def _edit_power(session: Session) -> None:
+    print("  random broadcast strength (dBm) -- blank both to disable")
+    lo = _prompt("  min dBm",
+                 "" if session.power_min_dbm is None else str(session.power_min_dbm))
+    hi = _prompt("  max dBm",
+                 "" if session.power_max_dbm is None else str(session.power_max_dbm))
+    if not lo.strip() and not hi.strip():
+        session.power_min_dbm = session.power_max_dbm = None
+        return
+    try:
+        pmin, pmax = float(lo), float(hi)
+        if pmax < pmin:
+            pmin, pmax = pmax, pmin
+        session.power_min_dbm, session.power_max_dbm = pmin, pmax
+    except ValueError:
+        print("  ! enter numbers for both bounds (leaving strength unchanged)")
 
 
 def _run_session(session: Session) -> None:
@@ -158,18 +175,25 @@ def _run_session(session: Session) -> None:
     print(f"\nBuilt {len(gen.bands)} bands. Press Ctrl-C to stop.")
     dur = _prompt("run for how many seconds? (blank = until Ctrl-C)")
     duration = float(dur) if dur else None
+    reporter = make_reporter("auto")
+    reporter.start()
+    import time as _time
+    t0 = _time.monotonic()
     try:
-        hops = gen.run(duration=duration)
+        hops = gen.run(duration=duration, on_hop=reporter.update)
     except Exception as exc:
         print(f"  ! run failed: {exc}")
         return
-    print(f"done: {hops} hops")
+    reporter.finish(hops, _time.monotonic() - t0)
 
 
 def _summary(session: Session) -> str:
+    power = ""
+    if session.has_power_range:
+        power = f"  power={session.power_min_dbm:g}..{session.power_max_dbm:g}dBm"
     return (
         f"name={session.name}  device={session.device}  "
-        f"ranges={len(session.ranges)}  dwell={session.dwell_seconds}s"
+        f"ranges={len(session.ranges)}  dwell={session.dwell_seconds}s{power}"
     )
 
 
@@ -194,6 +218,7 @@ def run_interactive(session: Optional[Session] = None) -> None:
             seed = _prompt("random seed (blank = none)",
                            "" if session.seed is None else str(session.seed))
             session.seed = int(seed) if seed.strip() else None
+            _edit_power(session)
         elif choice == "5":
             path = session_store.default_path_for(session.name)
             path = _prompt("save to", path)

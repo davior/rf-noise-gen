@@ -28,14 +28,19 @@ from typing import Optional
 from .base import DeviceCapabilities, DeviceError, RFDevice, TxBand
 
 # Serial commands, centralised so they are easy to correct per firmware.
-# ``{freq}`` is an integer in Hz; ``{start}``/``{stop}`` likewise.
+# ``{freq}`` is an integer in Hz; ``{start}``/``{stop}`` likewise; ``{dbm}`` is
+# an integer output level in dBm within the device's -110..-20 dBm range.
 _COMMANDS = {
     "cw": "sweep {freq} {freq} 2\r",           # single point == fixed carrier
     "sweep": "sweep {start} {stop} 450\r",       # sweep across the band
-    "level": "sweep gain {level}\r",             # output level (dBm-ish index)
+    "level": "level {dbm}\r",                    # output level in dBm
     "output_on": "output on\r",
     "output_off": "output off\r",
 }
+
+# Output level range of the tinySA Ultra signal generator.
+POWER_MIN_DBM = -110.0
+POWER_MAX_DBM = -20.0
 
 
 def _mode_for(hz: int) -> str:
@@ -59,14 +64,14 @@ class TinySAUltra(RFDevice):
     """
 
     def __init__(self, port: Optional[str] = None, mode: str = "sweep",
-                 level: int = 0, default_band_width: Optional[int] = None,
+                 level: float = -30.0, default_band_width: Optional[int] = None,
                  baudrate: int = 115200, **options):
         super().__init__(**options)
         if mode not in ("sweep", "cw"):
             raise ValueError("tinySA mode must be 'sweep' or 'cw'")
         self.port = port
         self.mode = mode
-        self.level = level
+        self.level = float(level)  # default output level in dBm
         self.baudrate = baudrate
         if default_band_width is None:
             default_band_width = 1_000_000 if mode == "sweep" else 100_000
@@ -82,8 +87,13 @@ class TinySAUltra(RFDevice):
             max_bandwidth_hz=None,
             default_band_width=int(default_band_width),
             description=f"CW signal generator, {mode} burst mode.",
+            power_min_dbm=POWER_MIN_DBM,
+            power_max_dbm=POWER_MAX_DBM,
         )
         self._serial = None
+
+    def _set_level(self, dbm: float) -> None:
+        self._send(_COMMANDS["level"].format(dbm=int(round(self.capabilities.clamp_power(dbm)))))
 
     def _on_open(self) -> None:
         if not self.port:
@@ -95,7 +105,7 @@ class TinySAUltra(RFDevice):
                 "tinySA requires pyserial (pip install rfnoise[hardware])"
             ) from exc
         self._serial = serial.Serial(self.port, self.baudrate, timeout=1)
-        self._send(_COMMANDS["level"].format(level=self.level))
+        self._set_level(self.level)
         self._send(_COMMANDS["output_on"])
 
     def _on_close(self) -> None:
@@ -112,7 +122,10 @@ class TinySAUltra(RFDevice):
         self._serial.write(command.encode("ascii"))
         self._serial.flush()
 
-    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float) -> None:
+    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
+                  power_dbm: Optional[float] = None) -> None:
+        if power_dbm is not None:
+            self._set_level(power_dbm)
         if self.mode == "cw":
             center = (int(start_hz) + int(stop_hz)) // 2
             self._send(_COMMANDS["cw"].format(freq=center))

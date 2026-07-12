@@ -57,6 +57,20 @@ class DeviceCapabilities:
     max_bandwidth_hz: Optional[int]
     default_band_width: int
     description: str = ""
+    # Output level range the device can be commanded to, in dBm. ``None`` on
+    # either bound means the device cannot control its output level.
+    power_min_dbm: Optional[float] = None
+    power_max_dbm: Optional[float] = None
+
+    @property
+    def controls_power(self) -> bool:
+        return self.power_min_dbm is not None and self.power_max_dbm is not None
+
+    def clamp_power(self, dbm: float) -> float:
+        """Clamp a requested dBm level into the device's supported range."""
+        if not self.controls_power:
+            return dbm
+        return max(self.power_min_dbm, min(self.power_max_dbm, dbm))
 
     @property
     def freq_min_hz(self) -> Optional[int]:
@@ -136,12 +150,15 @@ class RFDevice(ABC):
         pass
 
     @abstractmethod
-    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float) -> None:
+    def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
+                  power_dbm: Optional[float] = None) -> None:
         """Emit a signal covering ``start_hz``..``stop_hz`` for ``dwell_s``.
 
         Must return only after roughly ``dwell_s`` seconds have elapsed. The
         device should retune without stopping its output so consecutive calls
-        produce a seamless hop.
+        produce a seamless hop. ``power_dbm`` is the requested output level; it
+        is ``None`` when no level range is configured, in which case the device
+        uses its default/fixed level.
         """
 
     def describe(self) -> str:
@@ -153,10 +170,15 @@ class RFDevice(ABC):
             bw = f"no hardware cap (default {format_freq(caps.default_band_width)})"
         else:
             bw = format_freq(caps.max_bandwidth_hz)
+        if caps.controls_power:
+            power = f"{caps.power_min_dbm:g} to {caps.power_max_dbm:g} dBm"
+        else:
+            power = "not adjustable"
         tx = "transmit" if caps.can_transmit else "RECEIVE ONLY"
         return (
             f"{caps.name} [{tx}]\n"
             f"  frequency range : {rng}\n"
             f"  max broadcast bw: {bw}\n"
+            f"  output level    : {power}\n"
             f"  {caps.description}"
         )

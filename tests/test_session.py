@@ -17,6 +17,8 @@ def _sample_session():
         ],
         dwell_seconds=0.25,
         seed=7,
+        power_min_dbm=-60.0,
+        power_max_dbm=-30.0,
     )
 
 
@@ -27,6 +29,21 @@ def test_save_load_round_trip(tmp_path):
     loaded = session_store.load(path)
     assert loaded.to_dict() == session.to_dict()
     assert loaded.ranges[1].max_bandwidth_hz is None
+    assert loaded.power_min_dbm == -60.0
+    assert loaded.power_max_dbm == -30.0
+    assert loaded.has_power_range
+
+
+def test_power_range_defaults_none():
+    from rfnoise.model import Session
+    s = Session()
+    assert s.power_min_dbm is None and not s.has_power_range
+
+
+def test_power_range_rejects_inverted():
+    from rfnoise.model import Session
+    with pytest.raises(ValueError):
+        Session(power_min_dbm=-20.0, power_max_dbm=-60.0)
 
 
 def test_load_bare_dict(tmp_path):
