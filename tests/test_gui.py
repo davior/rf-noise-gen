@@ -127,6 +127,25 @@ def test_decay_tiers_stable_length():
     assert len(model.tiers(now=0.0)) == 6
 
 
+def test_decay_tiers_y_falls_toward_floor():
+    """With decay_to set, a point's y sinks from its value to the floor."""
+    model = gui.DecayPlotModel(decay_window=10.0, tier_count=6)
+    model.add(100.0, -10.0, now=0.0)   # plays at -10 dBm
+    floor = -80.0
+
+    def y_at(t):
+        for _alpha, xs, ys in model.tiers(now=t, decay_to=floor):
+            if xs:
+                return ys[0]
+        return None
+
+    assert y_at(0.0) == pytest.approx(-10.0)    # fresh: at its level
+    assert y_at(5.0) == pytest.approx(-45.0)     # halfway: midway to floor
+    assert y_at(9.99) == pytest.approx(-80.0, abs=0.2)  # nearly aged: at floor
+    # Fully aged -> pruned, nothing left to plot.
+    assert y_at(10.5) is None
+
+
 # -- plot axis extents (frequency vs strength view) ------------------------
 def test_frequency_extent_spans_all_ranges():
     sess = Session(ranges=[

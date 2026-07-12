@@ -202,12 +202,19 @@ class DecayPlotModel:
     def alpha_for(self, played_at: float, now: float) -> float:
         return max(0.0, 1.0 - (now - played_at) / self.decay_window)
 
-    def tiers(self, now: Optional[float] = None) -> List[Tuple[float, List[float], List[float]]]:
+    def tiers(self, now: Optional[float] = None,
+              decay_to: Optional[float] = None
+              ) -> List[Tuple[float, List[float], List[float]]]:
         """Return ``tier_count`` bands as ``(alpha, xs, ys)``, freshest first.
 
         Bands are evenly spaced in alpha; a point falls in the band matching its
         current opacity. Empty bands are still returned (with empty coordinate
         lists) so the GUI can keep a stable set of series and just update data.
+
+        ``decay_to``: when given, each point's ``y`` also *falls* toward this
+        value as it ages -- linearly from its original ``y`` (fresh) to
+        ``decay_to`` (fully aged) -- so bars sink to the floor before vanishing.
+        With ``None`` the ``y`` is returned unchanged (points only fade).
         """
         now = time.monotonic() if now is None else now
         self.prune(now)
@@ -220,6 +227,9 @@ class DecayPlotModel:
             a = self.alpha_for(played_at, now)
             if a <= 0.0:
                 continue
+            if decay_to is not None:
+                frac = (now - played_at) / self.decay_window  # 0 fresh -> 1 aged
+                y = y + (decay_to - y) * frac
             # Map alpha in (0,1] to a band index 0..tier_count-1 (freshest=0).
             idx = int((1.0 - a) * self.tier_count)
             if idx >= self.tier_count:
@@ -634,6 +644,15 @@ def run_gui(session: Optional[Session] = None) -> None:
         populate_from_session(sess)
         set_status(f"loaded {path}")
 
+    def on_decay_change(sender, app_data) -> None:
+        """Update how long bars take to sink to the floor and fade out."""
+        try:
+            value = float(app_data)
+        except (TypeError, ValueError):
+            return
+        if value > 0:
+            plot_model.decay_window = value
+
     def apply_plot_axes(sess: Session) -> None:
         """Pin the X/Y axes to the session's frequency + strength extents.
 
@@ -678,8 +697,9 @@ def run_gui(session: Optional[Session] = None) -> None:
         floor = state.get("y_floor", 0.0)
         # Each tier has a fixed alpha (set once when its theme is built); bars
         # migrate between tiers as they age, so we only update series *data*.
-        # y is shifted to a height above the strength floor (bars rise from 0).
-        for i, (_alpha, xs, ys) in enumerate(plot_model.tiers(now)):
+        # decay_to=floor makes each bar sink toward the floor as it ages; we
+        # then shift by the floor so heights fall to 0 (bars rise from 0).
+        for i, (_alpha, xs, ys) in enumerate(plot_model.tiers(now, decay_to=floor)):
             series = f"decay_series_{i}"
             if dpg.does_item_exist(series):
                 dpg.set_value(series, [list(xs), [y - floor for y in ys]])
@@ -741,6 +761,13 @@ def run_gui(session: Optional[Session] = None) -> None:
 
             # Right: live status + fading strength-vs-frequency plot.
             with dpg.child_window(autosize_x=True, autosize_y=True):
+                with dpg.group(horizontal=True):
+                    dpg.add_text("plot decay (s):")
+                    dpg.add_input_float(tag="f_decay_window",
+                                        default_value=plot_model.decay_window,
+                                        width=110, step=0.5, format="%.1f",
+                                        min_value=0.1, min_clamped=True,
+                                        callback=on_decay_change)
                 dpg.add_text("", tag="status_text")
                 with dpg.plot(label="Live spectrum -- strength vs frequency (fading)",
                               height=-1, width=-1):
