@@ -170,6 +170,44 @@ The GUI needs a graphical display. Over SSH, connect with X forwarding
 (`ssh -X`); on a headless box use `rfnoise ui` or `rfnoise run` instead. Without
 a display, `rfnoise gui` prints this guidance rather than a raw GLFW error.
 
+#### Running the GUI remotely or under code-server
+
+`rfnoise gui` opens a native OpenGL window, so it renders on a real display —
+it **cannot** appear inside a browser-based IDE (VS Code `code-server`, etc.).
+A few setups and their fixes:
+
+- **Different user than the desktop session** (e.g. `code-server` runs as
+  `devuser` but the desktop is user `gecko`). The GUI needs access to the
+  desktop user's X cookie. Share it once:
+
+  ```bash
+  # as the desktop user (gecko), in a desktop terminal:
+  xauth extract /tmp/xauth-share :1     # :1 = that session's DISPLAY
+  chmod a+r /tmp/xauth-share
+
+  # as the other user (devuser):
+  export DISPLAY=:1
+  export XAUTHORITY=/tmp/xauth-share
+  rfnoise gui                           # window opens on the physical screen
+  ```
+
+  The window still appears on the desktop user's monitor — this only grants
+  access, it does not move pixels into a browser. Delete `/tmp/xauth-share`
+  when done.
+
+- **Remote, and you want the GUI in a browser tab.** Use
+  [Xpra](https://github.com/Xpra-org/xpra)'s HTML5 client, which runs the app in
+  its own headless X server and serves just that window over HTTP:
+
+  ```bash
+  xpra start --start="rfnoise gui" \
+       --bind-tcp=0.0.0.0:14500 --html=on --exit-with-children=yes
+  # then open http://<host>:14500/ in your browser
+  ```
+
+- **No display at all.** Use the text UI — same engine, no window:
+  `rfnoise ui` (interactive editor) or `rfnoise run <session>`.
+
 Run a saved session headless:
 
 ```bash
