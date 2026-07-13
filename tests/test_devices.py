@@ -69,8 +69,9 @@ def test_describe_runs_for_all_devices():
 
 
 def test_power_capabilities():
-    assert TinySAUltra().capabilities.power_min_dbm == -110.0
-    assert TinySAUltra().capabilities.power_max_dbm == -20.0
+    # Firmware ``level -76..-6`` dBm range.
+    assert TinySAUltra().capabilities.power_min_dbm == -76.0
+    assert TinySAUltra().capabilities.power_max_dbm == -6.0
     assert HackRFOne().capabilities.controls_power is True
     assert RTLSDR().capabilities.controls_power is False
     assert MockDevice().capabilities.controls_power is True
@@ -79,9 +80,9 @@ def test_power_capabilities():
 
 def test_clamp_power():
     caps = TinySAUltra().capabilities
-    assert caps.clamp_power(0.0) == -20.0     # above max -> clamped
-    assert caps.clamp_power(-200.0) == -110.0  # below min -> clamped
-    assert caps.clamp_power(-50.0) == -50.0    # in range -> unchanged
+    assert caps.clamp_power(0.0) == -6.0      # above max -> clamped
+    assert caps.clamp_power(-200.0) == -76.0  # below min -> clamped
+    assert caps.clamp_power(-50.0) == -50.0   # in range -> unchanged
 
 
 def test_dbm_to_gain_monotonic_and_clamped():
@@ -281,7 +282,7 @@ def test_tinysa_reconnects_on_io_error(monkeypatch):
 
     assert dev._serial is fresh                                  # reconnected
     assert any(b"sweep 1 2 450" in w for w in fresh.writes)      # command retried
-    assert any(b"output on" in w for w in fresh.writes)          # output re-armed
+    assert any(b"mode output" in w for w in fresh.writes)        # generator mode re-armed
 
 
 def test_tinysa_reconnect_gives_up_when_device_stays_gone(monkeypatch):

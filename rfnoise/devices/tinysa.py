@@ -2,22 +2,25 @@
 
 The tinySA Ultra's built-in signal generator emits a single CW carrier -- it
 does not have a wide instantaneous bandwidth like an SDR. Two burst modes are
-therefore supported:
+supported:
 
 * ``"sweep"`` (default): sweep the carrier across the selected band for the
   dwell time, emulating a wideband splatter across the slice.
 * ``"cw"``: park a single tone at the band centre for the dwell time.
 
-Output stage is chosen automatically by frequency:
-  * sine   100 kHz - 800 MHz
-  * square 800 MHz - 4.4 GHz
-  * mixing 4.4 GHz - 5.4 GHz
+**The device must be put into generator (output) mode with ``mode output``**
+before it will transmit; otherwise ``sweep`` just runs a spectrum *scan* (which
+also floods the serial port). The output path is selected per hop:
 
-.. warning::
-   The exact serial command strings vary between tinySA firmware revisions and
-   could not be verified against hardware in this environment. They are grouped
-   in :data:`_COMMANDS` below; verify/adjust them against your firmware's
-   ``help`` output before trusting the RF output. Requires ``pyserial``.
+  * ``output normal`` -- fundamental output, up to ~800 MHz
+  * ``output mixer``  -- mixer/harmonic output, above ~800 MHz
+
+.. note::
+   Command strings here were checked against firmware ``tinySA4_v1.4`` (the
+   ``help``/usage output: ``mode [low] input|output``,
+   ``modulation off|am|fm|freq|depth|deviation 100..6000``, ``level -76..-6``,
+   ``sweeptime 0.003..60``, ``output on|off|normal|mixer``). Other revisions may
+   differ; they are grouped in :data:`_COMMANDS`. Requires ``pyserial``.
 """
 
 from __future__ import annotations
@@ -35,23 +38,26 @@ from .base import (
 )
 
 # Serial commands, centralised so they are easy to correct per firmware.
-# ``{freq}`` is an integer in Hz; ``{start}``/``{stop}`` likewise; ``{dbm}`` is
-# an integer output level in dBm within the device's -110..-20 dBm range.
+# ``{freq}``/``{start}``/``{stop}`` are integer Hz; ``{dbm}`` an integer level.
 _COMMANDS = {
-    "cw": "sweep {freq} {freq} 2\r",           # single point == fixed carrier
-    "sweep": "sweep {start} {stop} 450\r",       # sweep across the band
-    "level": "level {dbm}\r",                    # output level in dBm
+    "mode_output": "mode output\r",              # enter signal-generator mode
     "output_on": "output on\r",
     "output_off": "output off\r",
-    # -- fixed-tone modulation (FIRMWARE-SPECIFIC; verify before trusting RF) --
-    # The tinySA Ultra can impose a crude AM/FM on the parked CW carrier using
-    # its own internal tone -- it has no arbitrary IQ path, so only a tone
-    # source is possible. ``{tone}`` is the modulating tone in Hz, ``{depth}``
-    # the AM depth in percent (0-100), ``{deviation}`` the FM peak deviation in
-    # Hz. Command spellings vary by firmware; adjust against its ``help``.
-    "am": "am {tone} {depth}\r",
-    "fm": "fm {tone} {deviation}\r",
+    "output_normal": "output normal\r",          # fundamental output path
+    "output_mixer": "output mixer\r",            # mixer/harmonic output path
+    "level": "level {dbm}\r",                    # output level, -76..-6 dBm
+    "sweep": "sweep {start} {stop}\r",           # sweep the output across a band
+    "cw": "sweep {freq} {freq}\r",               # zero-span == a fixed carrier
+    "sweeptime": "sweeptime {seconds:.3f}\r",    # sweep duration, 0.003..60 s
+    # -- fixed-tone modulation (firmware ``modulation`` command; tinySA has no
+    # arbitrary-IQ path, so only a tone source is possible). ``{hz}`` is the
+    # internal tone / FM deviation in Hz (100..6000); ``{value}`` the AM depth. --
     "mod_off": "modulation off\r",
+    "mod_am": "modulation am\r",
+    "mod_fm": "modulation fm\r",
+    "mod_freq": "modulation freq {hz}\r",
+    "mod_depth": "modulation depth {value}\r",
+    "mod_deviation": "modulation deviation {hz}\r",
 }
 
 # Internal modulating-tone defaults when a session leaves them unset. Kept local
@@ -59,10 +65,16 @@ _COMMANDS = {
 _DEFAULT_TONE_HZ = 1_000
 _DEFAULT_AM_DEPTH_PCT = 50
 _DEFAULT_FM_DEVIATION_HZ = 5_000
+# Firmware limits for ``modulation freq``/``deviation`` (Hz).
+_MOD_HZ_MIN = 100
+_MOD_HZ_MAX = 6_000
+# Frequency at/below which the fundamental ("normal") output path is used;
+# above it the mixer path is needed.
+_NORMAL_OUTPUT_MAX_HZ = 800_000_000
 
-# Output level range of the tinySA Ultra signal generator.
-POWER_MIN_DBM = -110.0
-POWER_MAX_DBM = -20.0
+# Output level range of the tinySA Ultra signal generator (``level -76..-6``).
+POWER_MIN_DBM = -76.0
+POWER_MAX_DBM = -6.0
 
 # The tinySA shell echoes each command and prints this prompt when it is ready
 # for the next one. We read up to it after every command so the OS input buffer
@@ -119,21 +131,30 @@ class TinySAUltra(RFDevice):
 
     def __init__(self, port: Optional[str] = None, mode: str = "sweep",
                  level: float = -30.0, default_band_width: Optional[int] = None,
-                 baudrate: int = 115200,
+                 baudrate: int = 115200, output_stage: str = "auto",
                  reconnect_attempts: int = _RECONNECT_ATTEMPTS,
                  reconnect_delay: float = _RECONNECT_DELAY_S, **options):
         super().__init__(**options)
         if mode not in ("sweep", "cw"):
             raise ValueError("tinySA mode must be 'sweep' or 'cw'")
+        if output_stage not in ("auto", "normal", "mixer"):
+            raise ValueError("output_stage must be 'auto', 'normal' or 'mixer'")
         self.port = port
         self.mode = mode
         self.level = float(level)  # default output level in dBm
         self.baudrate = baudrate
+        # Which RF output path to use. "auto" picks normal/mixer by frequency;
+        # force "normal" or "mixer" if the auto boundary is wrong for your unit.
+        self.output_stage = output_stage
         # How hard to try to recover when the device drops off USB mid-run.
         # ``reconnect_attempts <= 0`` disables recovery (fail fast instead).
         self.reconnect_attempts = int(reconnect_attempts)
         self.reconnect_delay = float(reconnect_delay)
         self._reconnecting = False
+        # Last output path sent / whether modulation is currently on, so we only
+        # re-send those commands when they actually change hop to hop.
+        self._stage: Optional[str] = None
+        self._mod_on = False
         if default_band_width is None:
             default_band_width = 1_000_000 if mode == "sweep" else 100_000
         self.capabilities = DeviceCapabilities(
@@ -171,9 +192,45 @@ class TinySAUltra(RFDevice):
         )
 
     def _arm_output(self) -> None:
-        """Set the output level and enable output (used on open and reconnect)."""
+        """Enter generator mode and set a clean baseline (open and reconnect).
+
+        ``mode output`` is essential: without it the device stays in analyzer
+        mode and ``sweep`` runs a spectrum scan instead of transmitting. We also
+        clear any leftover modulation and set the default level. The per-hop
+        output path and ``output on`` are (re)issued by :meth:`broadcast` /
+        :meth:`_modulate`, so the stage state is reset here to force a resend.
+        """
+        self._send(_COMMANDS["mode_output"])
+        self._send(_COMMANDS["mod_off"])
+        self._mod_on = False
+        self._stage = None
         self._set_level(self.level)
-        self._send(_COMMANDS["output_on"])
+
+    def _stage_for(self, hz: int) -> str:
+        """Return the output path ("normal"/"mixer") for a carrier frequency."""
+        if self.output_stage != "auto":
+            return self.output_stage
+        return "normal" if hz <= _NORMAL_OUTPUT_MAX_HZ else "mixer"
+
+    def _ensure_stage(self, hz: int) -> None:
+        """Select the output path for ``hz`` if it differs from the last hop."""
+        stage = self._stage_for(hz)
+        if stage != self._stage:
+            key = "output_normal" if stage == "normal" else "output_mixer"
+            self._send(_COMMANDS[key])
+            self._stage = stage
+
+    def _set_sweeptime(self, dwell_s: float) -> None:
+        """Set the firmware sweep duration to the dwell (clamped to 3ms..60s)."""
+        if dwell_s <= 0:
+            return
+        seconds = max(0.003, min(60.0, float(dwell_s)))
+        self._send(_COMMANDS["sweeptime"].format(seconds=seconds))
+
+    def _clear_modulation(self) -> None:
+        if self._mod_on:
+            self._send(_COMMANDS["mod_off"])
+            self._mod_on = False
 
     def _on_open(self) -> None:
         if not self.port:
@@ -421,10 +478,17 @@ class TinySAUltra(RFDevice):
             return
         sweep = emission.sweep
         if sweep is not None and sweep.steps > 1:
+            # One native firmware sweep covers the whole span for the dwell --
+            # no Python step retunes.
+            center = (int(sweep.start_hz) + int(sweep.stop_hz)) // 2
+            self._ensure_stage(center)
+            self._clear_modulation()
             if emission.power_dbm is not None:
                 self._set_level(emission.power_dbm)
             self._send(_COMMANDS["sweep"].format(start=int(sweep.start_hz),
                                                  stop=int(sweep.stop_hz)))
+            self._set_sweeptime(emission.dwell_s)
+            self._send(_COMMANDS["output_on"])
             self._dwell(emission.dwell_s)
             return
         super().emit(emission)
@@ -432,33 +496,45 @@ class TinySAUltra(RFDevice):
     def _modulate(self, emission) -> None:
         """Park a carrier at the band centre and enable fixed-tone AM/FM.
 
-        Uses the device's internal modulating tone (``tone_hz`` or a default);
-        ``depth`` (AM) and ``deviation_hz`` (FM) fall back to sensible defaults
-        when the session leaves them unset. Serial strings are the (unverified)
-        entries in :data:`_COMMANDS`.
+        Uses the device's internal modulating tone (``tone_hz`` or a default,
+        clamped to the firmware's 100..6000 Hz range); ``depth`` (AM) and
+        ``deviation_hz`` (FM) fall back to defaults when unset. Realised with the
+        firmware ``modulation`` command (see :data:`_COMMANDS`).
         """
         center = (int(emission.start_hz) + int(emission.stop_hz)) // 2
+        self._ensure_stage(center)
         if emission.power_dbm is not None:
             self._set_level(emission.power_dbm)
-        self._send(_COMMANDS["cw"].format(freq=center))
+        self._send(_COMMANDS["cw"].format(freq=center))  # park the carrier
         tone = int(emission.tone_hz) if emission.tone_hz else _DEFAULT_TONE_HZ
+        tone = max(_MOD_HZ_MIN, min(_MOD_HZ_MAX, tone))
+        self._send(_COMMANDS["mod_freq"].format(hz=tone))
         if emission.modulation == Modulation.AM:
             depth_pct = (int(round(emission.depth * 100)) if emission.depth is not None
                          else _DEFAULT_AM_DEPTH_PCT)
-            self._send(_COMMANDS["am"].format(tone=tone, depth=depth_pct))
+            self._send(_COMMANDS["mod_depth"].format(value=depth_pct))
+            self._send(_COMMANDS["mod_am"])
         else:  # FM
             deviation = (int(emission.deviation_hz) if emission.deviation_hz
                          else _DEFAULT_FM_DEVIATION_HZ)
-            self._send(_COMMANDS["fm"].format(tone=tone, deviation=deviation))
+            deviation = max(_MOD_HZ_MIN, min(_MOD_HZ_MAX, deviation))
+            self._send(_COMMANDS["mod_deviation"].format(hz=deviation))
+            self._send(_COMMANDS["mod_fm"])
+        self._mod_on = True
+        self._send(_COMMANDS["output_on"])
         self._dwell(emission.dwell_s)
 
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
                   power_dbm: Optional[float] = None) -> None:
+        center = (int(start_hz) + int(stop_hz)) // 2
+        self._ensure_stage(center)
+        self._clear_modulation()
         if power_dbm is not None:
             self._set_level(power_dbm)
         if self.mode == "cw":
-            center = (int(start_hz) + int(stop_hz)) // 2
             self._send(_COMMANDS["cw"].format(freq=center))
         else:
             self._send(_COMMANDS["sweep"].format(start=int(start_hz), stop=int(stop_hz)))
+            self._set_sweeptime(dwell_s)
+        self._send(_COMMANDS["output_on"])
         self._dwell(dwell_s)
