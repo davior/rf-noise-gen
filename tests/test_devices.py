@@ -252,6 +252,45 @@ def test_tinysa_keep_alive_goes_quiet_during_pause():
     assert dev._tx_on is False
 
 
+def test_tinysa_settle_absorbs_boot_banner():
+    # Opening resets the device (boot banner). _settle must drain it so the
+    # first real command starts byte-aligned, not one response behind.
+    dev = TinySAUltra(port="/dev/ttyACM0", mode="sweep")
+
+    class _BootingSerial:
+        def __init__(self):
+            self.inbuf = b"tinySA Shell\r\ntinySA?\r\nch> "  # boot banner
+            self.writes = []
+            self.reset_calls = 0
+
+        @property
+        def in_waiting(self):
+            return len(self.inbuf)
+
+        def read(self, n):
+            chunk, self.inbuf = self.inbuf[:n], self.inbuf[n:]
+            return chunk
+
+        def write(self, data):
+            self.writes.append(data); return len(data)
+
+        def flush(self):
+            pass
+
+        def read_until(self, expected):
+            data, self.inbuf = self.inbuf, b""
+            return data
+
+        def reset_input_buffer(self):
+            self.inbuf = b""
+            self.reset_calls += 1
+
+    ser = _BootingSerial()
+    dev._settle(ser)
+    assert ser.inbuf == b""              # boot banner fully drained
+    assert ser.writes                    # sent a sync '\r'
+
+
 class _EIOOnWriteSerial(_StreamingSerial):
     """Fake serial that raises EIO on write, mimicking a USB drop.
 

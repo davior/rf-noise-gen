@@ -95,6 +95,14 @@ _DISCONNECT_ERRNOS = frozenset({errno.EIO, errno.ENODEV, errno.ENXIO, errno.EBAD
 _RECONNECT_ATTEMPTS = 6
 _RECONNECT_DELAY_S = 0.5
 
+# Opening the USB CDC port toggles DTR, which resets the tinySA: it prints a boot
+# banner and isn't ready for commands for a moment. We wait it out and drain all
+# output until the port has been quiet this long, bounded by a hard deadline,
+# before sending anything -- otherwise the banner desyncs every response by one.
+_BOOT_SETTLE_S = 0.3
+_BOOT_QUIET_S = 0.3
+_BOOT_DRAIN_MAX_S = 3.0
+
 
 def _import_serial(required: bool = False):
     """Return the pyserial module, ``None`` if absent (unless ``required``)."""
@@ -203,11 +211,48 @@ class TinySAUltra(RFDevice):
             self._last_level = lvl
 
     def _open_serial(self, port: str):
-        """Open the serial port (split out so reconnect/tests can reuse it)."""
+        """Open the serial port and wait out the reset the device does on open."""
         serial = _import_serial(required=True)
-        return serial.Serial(
+        ser = serial.Serial(
             port, self.baudrate, timeout=1, write_timeout=_WRITE_TIMEOUT_S
         )
+        self._settle(ser)
+        return ser
+
+    def _settle(self, ser) -> None:
+        """Absorb the boot banner the tinySA prints when the port opens.
+
+        Opening the USB CDC port toggles DTR, resetting the device: it prints a
+        boot banner and ignores/garbles commands for a moment. If we start
+        sending immediately, that banner leaves every command's response desynced
+        by one and eventually wedges the device (the input buffer backs up and
+        writes time out). So: pause for the reset, drain everything until the
+        port has been quiet briefly, then send a bare ``\\r`` and read to the
+        prompt so we are byte-aligned before the first real command.
+        """
+        time.sleep(_BOOT_SETTLE_S)
+        deadline = time.monotonic() + _BOOT_DRAIN_MAX_S
+        quiet_since: Optional[float] = None
+        while time.monotonic() < deadline:
+            n = getattr(ser, "in_waiting", 0)
+            if n:
+                ser.read(n)
+                quiet_since = None
+            else:
+                now = time.monotonic()
+                if quiet_since is None:
+                    quiet_since = now
+                elif now - quiet_since >= _BOOT_QUIET_S:
+                    break
+                time.sleep(0.02)
+        # Align on a fresh prompt so the first command's echo reads cleanly.
+        try:
+            ser.reset_input_buffer()
+            ser.write(b"\r")
+            ser.flush()
+            ser.read_until(_PROMPT)
+        except Exception:  # pragma: no cover - best effort on a flaky port
+            pass
 
     def _arm_output(self) -> None:
         """Enter generator mode and set a clean baseline (open and reconnect).
@@ -442,24 +487,19 @@ class TinySAUltra(RFDevice):
             sys.stderr.flush()
 
     def _drain(self) -> bytes:
-        """Consume and return the shell's echo/response after a command.
+        """Consume and return the shell's echo + ``ch>`` prompt after a command.
 
         The tinySA echoes every command and follows it with a ``ch>`` prompt.
-        If it is never read the OS input buffer (~4 KB) fills, back-pressures
-        the port, and the next write blocks. Reading up to the prompt after each
-        command keeps the buffer empty; the serial read timeout bounds the wait
-        if a firmware revision omits the prompt. Returned bytes feed debug logs.
+        Reading exactly up to that prompt keeps the link byte-aligned: each
+        command's echo is consumed by that command's drain, so the next read
+        can't run one-behind. We deliberately do **not** ``reset_input_buffer``
+        here -- that used to discard an in-flight echo and desync the stream.
+        Alignment is instead established once, at open, by :meth:`_settle`. The
+        read timeout bounds the wait if a firmware revision omits the prompt.
         """
         if self._serial is None:  # pragma: no cover - guarded by callers
             return b""
-        data = self._serial.read_until(_PROMPT) or b""
-        # Backstop: if a firmware revision's prompt/output doesn't match
-        # ``ch> `` exactly, ``read_until`` stops at the read timeout with bytes
-        # still queued. Clear them so nothing carries into the next write.
-        reset = getattr(self._serial, "reset_input_buffer", None)
-        if reset is not None:
-            reset()
-        return data
+        return self._serial.read_until(_PROMPT) or b""
 
     def _dwell(self, seconds: float) -> None:
         """Hold for the dwell while transmitting -- with **no** serial I/O.
@@ -521,9 +561,9 @@ class TinySAUltra(RFDevice):
             self._clear_modulation()
             if emission.power_dbm is not None:
                 self._set_level(emission.power_dbm)
+            self._set_sweeptime(emission.dwell_s)
             self._send(_COMMANDS["sweep"].format(start=int(sweep.start_hz),
                                                  stop=int(sweep.stop_hz)))
-            self._set_sweeptime(emission.dwell_s)
             self._enable_output()           # transmit for the dwell
             self._dwell(emission.dwell_s)
             return
@@ -572,7 +612,7 @@ class TinySAUltra(RFDevice):
         if self.mode == "cw":
             self._send(_COMMANDS["cw"].format(freq=center))
         else:
+            self._set_sweeptime(dwell_s)    # set duration while idle...
             self._send(_COMMANDS["sweep"].format(start=int(start_hz), stop=int(stop_hz)))
-            self._set_sweeptime(dwell_s)
-        self._enable_output()               # transmit for the dwell
+        self._enable_output()               # ...then transmit for the dwell
         self._dwell(dwell_s)
