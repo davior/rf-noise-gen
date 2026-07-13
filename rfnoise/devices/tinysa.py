@@ -95,13 +95,15 @@ _DISCONNECT_ERRNOS = frozenset({errno.EIO, errno.ENODEV, errno.ENXIO, errno.EBAD
 _RECONNECT_ATTEMPTS = 6
 _RECONNECT_DELAY_S = 0.5
 
-# Opening the USB CDC port toggles DTR, which resets the tinySA: it prints a boot
-# banner and isn't ready for commands for a moment. We wait it out and drain all
-# output until the port has been quiet this long, bounded by a hard deadline,
-# before sending anything -- otherwise the banner desyncs every response by one.
-_BOOT_SETTLE_S = 0.3
-_BOOT_QUIET_S = 0.3
-_BOOT_DRAIN_MAX_S = 3.0
+# Opening the USB CDC port toggles DTR, which *resets* the tinySA: it reboots,
+# prints a boot banner, and does not accept commands for a second or two. If we
+# start talking before it is ready, the banner desyncs every response by one and
+# the mistimed commands wedge it. So after opening we actively ping it (bare CR)
+# until it answers with a clean prompt and nothing trailing -- i.e. it has
+# finished booting and the link is byte-aligned. Bounded by a hard deadline.
+_SETTLE_MAX_S = 8.0        # give the reboot up to this long to complete
+_SETTLE_PING_GAP_S = 0.3   # wait between ping attempts while it is still booting
+_SETTLE_QUIET_S = 0.15     # after a prompt, no new bytes for this long == synced
 
 
 def _import_serial(required: bool = False):
@@ -220,39 +222,45 @@ class TinySAUltra(RFDevice):
         return ser
 
     def _settle(self, ser) -> None:
-        """Absorb the boot banner the tinySA prints when the port opens.
+        """Wait out the reset the device does on open, until it answers cleanly.
 
-        Opening the USB CDC port toggles DTR, resetting the device: it prints a
-        boot banner and ignores/garbles commands for a moment. If we start
-        sending immediately, that banner leaves every command's response desynced
-        by one and eventually wedges the device (the input buffer backs up and
-        writes time out). So: pause for the reset, drain everything until the
-        port has been quiet briefly, then send a bare ``\\r`` and read to the
-        prompt so we are byte-aligned before the first real command.
+        Opening the port reboots the tinySA (DTR): it prints a boot banner and
+        rejects/garbles commands until it is ready. A fixed delay is unreliable
+        (boot time varies, and the banner arrives in bursts). Instead we poll:
+        clear the buffer, send a bare CR, and read to the prompt; if the write
+        stalls or extra bytes keep arriving, it is still booting -- wait and
+        retry. Once a CR yields a lone ``ch>`` with nothing trailing, the reboot
+        is done and the link is aligned, so the first real command reads cleanly.
         """
-        time.sleep(_BOOT_SETTLE_S)
-        deadline = time.monotonic() + _BOOT_DRAIN_MAX_S
-        quiet_since: Optional[float] = None
+        serial = _import_serial()
+
+        def _flush_in():
+            reset = getattr(ser, "reset_input_buffer", None)
+            if reset is not None:
+                try:
+                    reset()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+
+        deadline = time.monotonic() + _SETTLE_MAX_S
         while time.monotonic() < deadline:
-            n = getattr(ser, "in_waiting", 0)
-            if n:
-                ser.read(n)
-                quiet_since = None
-            else:
-                now = time.monotonic()
-                if quiet_since is None:
-                    quiet_since = now
-                elif now - quiet_since >= _BOOT_QUIET_S:
-                    break
-                time.sleep(0.02)
-        # Align on a fresh prompt so the first command's echo reads cleanly.
-        try:
-            ser.reset_input_buffer()
-            ser.write(b"\r")
-            ser.flush()
-            ser.read_until(_PROMPT)
-        except Exception:  # pragma: no cover - best effort on a flaky port
-            pass
+            _flush_in()
+            try:
+                ser.write(b"\r")
+                ser.flush()
+            except Exception as exc:  # still booting -> not accepting writes yet
+                if serial is not None and isinstance(exc, serial.SerialException):
+                    time.sleep(_SETTLE_PING_GAP_S)
+                    continue
+                raise
+            ser.read_until(_PROMPT)             # consume the CR's prompt
+            time.sleep(_SETTLE_QUIET_S)         # let any trailing boot bytes land
+            if not getattr(ser, "in_waiting", 0):
+                _flush_in()                     # clean, aligned -> done
+                return
+            time.sleep(_SETTLE_PING_GAP_S)      # more chatter -> keep waiting
+        # Deadline hit: proceed anyway; a residual desync will surface as a
+        # write stall which the caller's retry/reconnect handles.
 
     def _arm_output(self) -> None:
         """Enter generator mode and set a clean baseline (open and reconnect).
