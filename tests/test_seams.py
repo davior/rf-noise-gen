@@ -42,20 +42,23 @@ def test_emit_ignores_modulation_fields_today():
 
 def test_every_device_declares_its_axes():
     # Every device can random-hop and always advertises plain (NONE) output.
-    # Phase 3 gives the mock an IQ modulation path; the hardware drivers stay
-    # NONE-only until their own wiring PR lands.
+    # Phase 3 adds AM/FM to the transmitters: mock + HackRF via arbitrary IQ
+    # ("iq" fidelity), the tinySA via a crude fixed internal tone
+    # ("fixed_tone", no IQ bandwidth). RTL-SDR is receive-only, so NONE only.
+    expected = {
+        "mock": ({Modulation.AM, Modulation.FM}, "iq", True),
+        "hackrf": ({Modulation.AM, Modulation.FM}, "iq", True),
+        "tinysa": ({Modulation.AM, Modulation.FM}, "fixed_tone", False),
+        "rtlsdr": (set(), "none", False),
+    }
     for key in device_keys():
         caps = create_device(key).capabilities
         assert Traversal.RANDOM_HOP in caps.supported_traversals
         assert Modulation.NONE in caps.supported_modulations
-        if key == "mock":
-            assert {Modulation.AM, Modulation.FM} <= caps.supported_modulations
-            assert caps.modulation_fidelity == "iq"
-            assert caps.instantaneous_bw_hz is not None
-        else:
-            assert caps.supported_modulations == frozenset({Modulation.NONE})
-            assert caps.instantaneous_bw_hz is None
-            assert caps.modulation_fidelity == "none"
+        mods, fidelity, has_iq_bw = expected[key]
+        assert mods <= caps.supported_modulations
+        assert caps.modulation_fidelity == fidelity
+        assert (caps.instantaneous_bw_hz is not None) == has_iq_bw
 
 
 def test_random_band_selector_alias_still_importable():

@@ -23,7 +23,14 @@ import subprocess
 import time
 from typing import Optional
 
-from .base import DeviceCapabilities, DeviceError, RFDevice, TxBand
+from .base import (
+    DeviceCapabilities,
+    DeviceError,
+    Emission,
+    Modulation,
+    RFDevice,
+    TxBand,
+)
 
 MAX_SAMPLE_RATE = 20_000_000  # 20 Msps -> ~20 MHz instantaneous bandwidth
 
@@ -59,6 +66,43 @@ def make_noise_samples(count: int, seed: Optional[int] = None) -> bytes:
     return bytes(buf)
 
 
+def iq_to_int8(iq) -> bytes:
+    """Convert a complex IQ array to interleaved signed 8-bit I/Q bytes.
+
+    Scales by the peak magnitude so the strongest sample maps to full-scale
+    (+/-127), then interleaves I,Q -- the format ``hackrf_transfer`` streams.
+    Pure and numpy-based (requires the ``[dsp]`` extra), so it is unit-testable
+    without hardware.
+    """
+    from ..modulation import require_numpy
+
+    np = require_numpy()
+    arr = np.asarray(iq, dtype=np.complex128)
+    peak = float(np.max(np.abs(arr))) if arr.size else 0.0
+    scale = 127.0 / peak if peak > 0 else 0.0
+    out = np.empty(2 * arr.size, dtype=np.int8)
+    out[0::2] = np.clip(np.round(arr.real * scale), -127, 127).astype(np.int8)
+    out[1::2] = np.clip(np.round(arr.imag * scale), -127, 127).astype(np.int8)
+    return out.tobytes()
+
+
+def make_modulated_samples(emission: Emission, sample_rate: int,
+                           count: int) -> bytes:
+    """Generate ``count`` interleaved 8-bit I/Q samples for a modulated emission.
+
+    Synthesises the baseband IQ with the DSP core (:func:`generate_iq`) and
+    converts it with :func:`iq_to_int8`. Requires the ``[dsp]`` extra.
+    """
+    from .. import modulation as dsp
+
+    iq = dsp.generate_iq(
+        emission.modulation, count, sample_rate,
+        source=emission.source, depth=emission.depth,
+        deviation_hz=emission.deviation_hz, tone_hz=emission.tone_hz,
+    )
+    return iq_to_int8(iq)
+
+
 class HackRFOne(RFDevice):
     """Driver that streams broadband noise through ``hackrf_transfer``.
 
@@ -83,6 +127,13 @@ class HackRFOne(RFDevice):
             description="Wideband SDR transceiver, up to 20 MHz instantaneous bandwidth.",
             power_min_dbm=POWER_MIN_DBM,
             power_max_dbm=POWER_MAX_DBM,
+            # True IQ transmitter: we synthesise arbitrary AM/FM ourselves and
+            # stream it (fidelity "iq"). Needs the [dsp] extra to generate IQ.
+            supported_modulations=frozenset(
+                {Modulation.NONE, Modulation.AM, Modulation.FM}
+            ),
+            instantaneous_bw_hz=MAX_SAMPLE_RATE,
+            modulation_fidelity="iq",
         )
         self._proc: Optional[subprocess.Popen] = None
 
@@ -98,12 +149,45 @@ class HackRFOne(RFDevice):
                 self._proc.kill()
             self._proc = None
 
+    def emit(self, emission: Emission) -> None:
+        """Emit one :class:`Emission`, streaming synthesised IQ when modulated.
+
+        A plain (``NONE``) emission takes the base path (sweep-aware
+        :meth:`broadcast`, streaming broadband noise). An AM/FM emission is
+        generated as baseband IQ at the full sample rate, tuned to the band
+        centre, and streamed like the noise path (per-hop restart). Generating
+        IQ requires the ``[dsp]`` extra.
+        """
+        if emission.modulation == Modulation.NONE:
+            super().emit(emission)
+            return
+        center = (int(emission.start_hz) + int(emission.stop_hz)) // 2
+        # Modulated: use the full sample rate so the message/deviation fit
+        # regardless of the slice width (AM/FM occupied bandwidth is set by the
+        # depth/deviation, not the band width).
+        sample_rate = MAX_SAMPLE_RATE
+        gain = (self.txvga_gain if emission.power_dbm is None
+                else dbm_to_gain(emission.power_dbm))
+        chunk = make_modulated_samples(emission, sample_rate, sample_rate // 10 or 1)
+        self._stream(center, sample_rate, gain, chunk, emission.dwell_s)
+
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
                   power_dbm: Optional[float] = None) -> None:
         center = (int(start_hz) + int(stop_hz)) // 2
         width = max(1, int(stop_hz) - int(start_hz))
         sample_rate = min(width, MAX_SAMPLE_RATE)
         gain = self.txvga_gain if power_dbm is None else dbm_to_gain(power_dbm)
+        chunk = make_noise_samples(sample_rate // 10 or 1)  # ~0.1s of samples
+        self._stream(center, sample_rate, gain, chunk, dwell_s)
+
+    def _stream(self, center: int, sample_rate: int, gain: int, chunk: bytes,
+                dwell_s: float) -> None:
+        """(Re)start ``hackrf_transfer`` at ``center`` and stream ``chunk`` for the dwell.
+
+        Retunes by restarting the transfer -- the small per-hop gap noted in the
+        module docstring. Writes the pre-generated ``chunk`` repeatedly until the
+        dwell elapses; a broken pipe (device/tool gone) ends the write quietly.
+        """
         self._stop_proc()  # retune by restarting the stream
         cmd = [
             self.binary,
@@ -121,7 +205,6 @@ class HackRFOne(RFDevice):
             ) from exc
 
         deadline = time.monotonic() + dwell_s
-        chunk = make_noise_samples(sample_rate // 10 or 1)  # ~0.1s of samples
         assert self._proc.stdin is not None
         try:
             while time.monotonic() < deadline:
