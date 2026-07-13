@@ -85,6 +85,28 @@ def build_bands(ranges: Sequence[FrequencyRange], device_max: Optional[int],
     return pool
 
 
+def coverage_bandwidth(rng: FrequencyRange) -> int:
+    """Width of one *coverage* chunk for sweep-in-band mode.
+
+    Unlike :func:`effective_bandwidth`, this is **not** capped by the device: it
+    is the amount of spectrum to cover in a single dwell, taken from the range's
+    ``max_bandwidth_hz`` override if set, else the whole range. The engine then
+    sweeps across a chunk wider than the device can emit in one burst.
+    """
+    if rng.max_bandwidth_hz is not None:
+        return max(1, min(rng.max_bandwidth_hz, rng.width_hz))
+    return rng.width_hz
+
+
+def build_coverage_bands(ranges: Sequence[FrequencyRange],
+                         overlap: float = 0.0) -> List[Band]:
+    """Build the pooled coverage chunks across every range (device-uncapped)."""
+    pool: List[Band] = []
+    for rng in ranges:
+        pool.extend(split_range(rng, coverage_bandwidth(rng), overlap))
+    return pool
+
+
 def __getattr__(name: str) -> Any:
     """Lazily re-export ``RandomBandSelector`` from :mod:`rfnoise.tuning`.
 

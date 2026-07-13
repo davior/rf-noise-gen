@@ -138,8 +138,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="run a saved session")
     p_run.add_argument("session", help="session JSON file")
     p_run.add_argument("--device", choices=device_keys(), help="override device")
-    p_run.add_argument("--traversal", choices=["random_hop", "sequential"],
-                       help="override tuning mode: random-hop or sequential sweep")
+    p_run.add_argument("--traversal",
+                       choices=["random_hop", "sequential", "sweep_in_band"],
+                       help="override tuning mode: random-hop, sequential sweep, "
+                            "or sweep-within-band")
     p_run.add_argument("--duration", type=float, help="seconds to run")
     p_run.add_argument("--iterations", type=int, help="number of hops")
     p_run.add_argument("--pause-seconds", type=float,

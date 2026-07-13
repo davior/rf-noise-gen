@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import math
 import random
 import time
 from typing import Callable, List, Optional
 
-from .bands import Band, build_bands
-from .devices.base import Emission, RFDevice, Traversal
+from .bands import Band, build_bands, build_coverage_bands
+from .devices.base import Emission, RFDevice, SweepSpec, Traversal
 from .freq import format_freq
 from .model import Session
 from .status import HopStatus
-from .tuning import RandomPooledStrategy, SequentialSweepStrategy
+from .tuning import (
+    RandomPooledStrategy,
+    SequentialSweepStrategy,
+    SweepInBandStrategy,
+)
 
 
 class ConfigurationError(Exception):
@@ -42,17 +47,22 @@ def validate(session: Session, device: RFDevice) -> List[Band]:
                 f"({format_freq(fmin)}-{format_freq(fmax)})."
             )
 
-    device_max = min(
-        (device.max_bandwidth_for(r.lower_hz) for r in session.ranges
-         if device.max_bandwidth_for(r.lower_hz) is not None),
-        default=None,
-    )
-    bands = build_bands(
-        session.ranges,
-        device_max=device_max,
-        device_default=device.capabilities.default_band_width,
-        overlap=session.overlap,
-    )
+    if session.traversal == Traversal.SWEEP_IN_BAND:
+        # Sweep mode covers each range in device-uncapped chunks; the engine
+        # steps across any chunk wider than one burst.
+        bands = build_coverage_bands(session.ranges, overlap=session.overlap)
+    else:
+        device_max = min(
+            (device.max_bandwidth_for(r.lower_hz) for r in session.ranges
+             if device.max_bandwidth_for(r.lower_hz) is not None),
+            default=None,
+        )
+        bands = build_bands(
+            session.ranges,
+            device_max=device_max,
+            device_default=device.capabilities.default_band_width,
+            overlap=session.overlap,
+        )
     if not bands:
         raise ConfigurationError("no broadcast bands could be built from ranges.")
     return bands
@@ -75,7 +85,9 @@ class NoiseGenerator:
         self.rng = random.Random(session.seed)
         # Pick the tuning strategy from the session. SequentialSweepStrategy
         # draws no randomness, so it never perturbs the shared power stream.
-        if session.traversal == Traversal.SEQUENTIAL:
+        if session.traversal == Traversal.SWEEP_IN_BAND:
+            self.selector = SweepInBandStrategy(self.bands)
+        elif session.traversal == Traversal.SEQUENTIAL:
             self.selector = SequentialSweepStrategy(self.bands)
         else:
             self.selector = RandomPooledStrategy(self.bands, rng=self.rng)
@@ -104,6 +116,25 @@ class NoiseGenerator:
         if self.power_range is None:
             return None
         return self.rng.uniform(self.power_range[0], self.power_range[1])
+
+    def _sweep_for(self, band: Band, dwell: float) -> Optional[SweepSpec]:
+        """Build a :class:`SweepSpec` for ``band`` if it must be swept, else None.
+
+        Only sweep-in-band mode sweeps. A band no wider than the device's single
+        burst (``max_bandwidth_for`` or, if uncapped like the tinySA, its
+        ``default_band_width``) is emitted as one plain band; a wider one is
+        divided into ``ceil(width / burst)`` steps to cover across the dwell.
+        """
+        if self.session.traversal != Traversal.SWEEP_IN_BAND:
+            return None
+        burst = (self.device.max_bandwidth_for(band.center_hz)
+                 or self.device.capabilities.default_band_width)
+        width = band.stop_hz - band.start_hz
+        steps = max(1, math.ceil(width / burst)) if burst else 1
+        if steps <= 1:
+            return None
+        return SweepSpec(start_hz=band.start_hz, stop_hz=band.stop_hz,
+                         steps=steps, duration_s=dwell, mode="stepped")
 
     def stop(self) -> None:
         self._stopped = True
@@ -172,6 +203,7 @@ class NoiseGenerator:
                     stop_hz=band.stop_hz,
                     dwell_s=dwell,
                     power_dbm=power,
+                    sweep=self._sweep_for(band, dwell),
                 ))
                 self.hops += 1
                 # Periodic pause: hold transmission after every N hops. Skipped

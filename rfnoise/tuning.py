@@ -14,8 +14,10 @@ Two strategies exist today:
   and must be preserved.
 * :class:`SequentialSweepStrategy` plays every band once, in ascending frequency
   order, then wraps -- a deterministic low-to-high sweep across the ranges.
-
-The sweep-within-band strategy is added in a later phase.
+* :class:`SweepInBandStrategy` sweeps *coverage* bands (which may be wider than
+  the device can emit at once) in the same ascending order; the engine attaches a
+  ``SweepSpec`` to any band wider than one burst so the device steps across it
+  within the dwell.
 """
 
 from __future__ import annotations
@@ -83,6 +85,16 @@ class SequentialSweepStrategy(TuningStrategy):
         band = self._bands[self._index]
         self._index = (self._index + 1) % len(self._bands)
         return band
+
+
+class SweepInBandStrategy(SequentialSweepStrategy):
+    """Sweep coverage bands in ascending order (see module docstring).
+
+    Ordering is identical to :class:`SequentialSweepStrategy`; the distinction is
+    semantic -- this strategy is fed the device-*uncapped* coverage pool
+    (:func:`rfnoise.bands.build_coverage_bands`), and the engine turns any band
+    wider than one burst into a stepped ``SweepSpec``.
+    """
 
 
 #: Backwards-compatible alias for the pre-refactor class name.

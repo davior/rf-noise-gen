@@ -41,8 +41,8 @@ class HopStatus:
         # first hop reads 0.0 rather than a spike from near-zero elapsed time.
         completed = max(0, self.index - 1)
         rate = completed / self.elapsed_s if self.elapsed_s > 0 else 0.0
-        # Compact glyph for the tuning mode: sweep vs random hop.
-        mode = "↑" if self.traversal == "sequential" else "⟳"
+        # Compact glyph for the tuning mode: sweep-in-band, sequential, or hop.
+        mode = {"sequential": "↑", "sweep_in_band": "↔"}.get(self.traversal, "⟳")
         return (
             f"{mode} {format_freq(self.center_hz):>10}  "
             f"band {format_freq(self.start_hz)}-{format_freq(self.stop_hz)}  "

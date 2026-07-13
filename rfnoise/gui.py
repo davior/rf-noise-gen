@@ -90,7 +90,9 @@ SETTING_TIPS: Dict[str, str] = {
                  "together for denser coverage.",
     "f_traversal": "How the frequency moves between hops. 'random_hop' picks a "
                    "random band each time; 'sequential' sweeps every band in "
-                   "order from lowest to highest, then repeats.",
+                   "order from lowest to highest, then repeats; 'sweep_in_band' "
+                   "covers each range's full width by stepping across it during "
+                   "one dwell (uses the device's native sweep where available).",
     "f_seed": "Seed for the random hop sequence. Leave blank for a fresh "
               "random pattern each run; set a value to reproduce the exact "
               "same sequence.",
@@ -871,9 +873,9 @@ def run_gui(session: Optional[Session] = None) -> None:
                 dpg.add_input_float(label="overlap", tag="f_overlap",
                                     default_value=session.overlap, width=160, step=0)
                 add_tip("f_overlap", SETTING_TIPS["f_overlap"])
-                dpg.add_combo(["random_hop", "sequential"], label="tuning mode",
-                              tag="f_traversal", default_value=session.traversal.value,
-                              width=200)
+                dpg.add_combo(["random_hop", "sequential", "sweep_in_band"],
+                              label="tuning mode", tag="f_traversal",
+                              default_value=session.traversal.value, width=200)
                 add_tip("f_traversal", SETTING_TIPS["f_traversal"])
                 dpg.add_input_text(label="seed (blank=random)", tag="f_seed",
                                    default_value="" if session.seed is None else str(session.seed),
