@@ -240,12 +240,16 @@ class DecayPlotModel:
             raise ValueError("tier_count must be >= 1")
         self.decay_window = float(decay_window)
         self.tier_count = int(tier_count)
-        # Each entry: (played_at, x, y). x/y are plot coordinates -- the GUI uses
-        # x = center frequency (MHz), y = strength (dBm).
-        self._points: List[Tuple[float, float, float]] = []
+        # Each entry: (played_at, x, y, width). x/y/width are plot coordinates --
+        # the GUI uses x = center frequency (MHz), y = strength (dBm), and
+        # width = emission bandwidth (MHz) so a bar can be drawn as wide as the
+        # band it occupies. ``width`` is 0 for callers that don't supply one.
+        self._points: List[Tuple[float, float, float, float]] = []
 
-    def add(self, x: float, y: float, now: Optional[float] = None) -> None:
-        self._points.append((time.monotonic() if now is None else now, float(x), float(y)))
+    def add(self, x: float, y: float, width: float = 0.0,
+            now: Optional[float] = None) -> None:
+        self._points.append((time.monotonic() if now is None else now,
+                             float(x), float(y), float(width)))
 
     def prune(self, now: Optional[float] = None) -> None:
         """Drop points that have fully decayed."""
@@ -278,7 +282,7 @@ class DecayPlotModel:
             (((self.tier_count - i) - 0.5) / self.tier_count, [], [])
             for i in range(self.tier_count)
         ]
-        for played_at, x, y in self._points:
+        for played_at, x, y, _width in self._points:
             a = self.alpha_for(played_at, now)
             if a <= 0.0:
                 continue
@@ -292,6 +296,43 @@ class DecayPlotModel:
             bands[idx][1].append(x)
             bands[idx][2].append(y)
         return bands
+
+    def bars(self, now: Optional[float] = None,
+             decay_to: Optional[float] = None,
+             min_width: float = 0.0
+             ) -> List[Tuple[int, float, List[float], List[float]]]:
+        """Group live points by ``(opacity tier, bar width)`` for rendering.
+
+        Like :meth:`tiers` (same age->tier bucketing and optional ``decay_to``
+        sink), but each group also carries the **bar weight** to draw it at:
+        ``max(point width, min_width)``. Wide emissions render at their true
+        bandwidth; very narrow ones are floored to ``min_width`` so they stay
+        visible. Returned as ``(tier_index, weight, xs, ys)`` with ``tier_index``
+        0 = freshest -- ImPlot's ``bar_series`` takes one weight per series, so
+        the GUI renders one series per group.
+        """
+        now = time.monotonic() if now is None else now
+        self.prune(now)
+        groups: Dict[Tuple[int, float], Tuple[List[float], List[float]]] = {}
+        for played_at, x, y, width in self._points:
+            a = self.alpha_for(played_at, now)
+            if a <= 0.0:
+                continue
+            if decay_to is not None:
+                frac = (now - played_at) / self.decay_window
+                y = y + (decay_to - y) * frac
+            idx = int((1.0 - a) * self.tier_count)
+            if idx >= self.tier_count:
+                idx = self.tier_count - 1
+            weight = max(width, min_width)
+            # Quantise the weight so tiny float differences don't fragment the
+            # groups (and thus the series pool) unboundedly.
+            key = (idx, round(weight, 9))
+            xs, ys = groups.setdefault(key, ([], []))
+            xs.append(x)
+            ys.append(y)
+        return [(idx, weight, xs, ys)
+                for (idx, weight), (xs, ys) in groups.items()]
 
     def clear(self) -> None:
         self._points.clear()
@@ -519,7 +560,10 @@ def run_gui(session: Optional[Session] = None) -> None:
 
     controller = RunController()
     plot_model = DecayPlotModel()
-    state: Dict[str, Any] = {"row_ids": [], "device": session.device}
+    state: Dict[str, Any] = {"row_ids": [], "device": session.device,
+                             # (tier_index, weight) -> bar_series tag; grown
+                             # lazily as new emission bandwidths appear.
+                             "bar_series": {}}
     # Form values for the initial session -- used to seed the widgets at build
     # time (name/dwell/seed/power) and populate the range table.
     _initial_values, _initial_rows = session_to_form(session)
@@ -737,10 +781,12 @@ def run_gui(session: Optional[Session] = None) -> None:
             span = hi - lo
             pad = span * 0.03 or (1.0 / HZ_PER_MHZ)
             dpg.set_axis_limits("plot_x", lo - pad, hi + pad)
-            state["bar_weight"] = max(span * 0.006, 1.0 / HZ_PER_MHZ)
+            # Minimum bar width so a very narrow emission is still visible; wider
+            # emissions render at their true bandwidth (see refresh_plot/bars()).
+            state["min_bar_width"] = max(span * 0.006, 1.0 / HZ_PER_MHZ)
         else:
             dpg.set_axis_limits_auto("plot_x")
-            state["bar_weight"] = 1.0
+            state["min_bar_width"] = 1.0
 
         plo, phi = power_extent(sess)
         state["y_floor"] = plo  # bar heights are measured up from here
@@ -749,30 +795,53 @@ def run_gui(session: Optional[Session] = None) -> None:
         dpg.set_axis_limits("plot_y", -ppad, (phi - plo) + ppad)
         dpg.set_axis_ticks("plot_y",
                            tuple((lbl, pos - plo) for lbl, pos in dbm_ticks(plo, phi)))
-        for i in range(plot_model.tier_count):
-            series = f"decay_series_{i}"
-            if dpg.does_item_exist(series):
-                dpg.configure_item(series, weight=state["bar_weight"])
 
     # -- per-frame plot + queue drain (UI thread only) -------------------
+    def ensure_bar_series(tier_idx: int, weight: float) -> str:
+        """Return the bar_series tag for ``(tier, weight)``, creating it if new.
+
+        ImPlot's bar_series has one width per series, so each distinct emission
+        bandwidth in a tier needs its own series. The pool is small (one width
+        per range, quantised) and grows only when a new width first appears.
+        """
+        key = (tier_idx, round(weight, 9))
+        tag = state["bar_series"].get(key)
+        if tag is None:
+            tag = f"decay_s_{tier_idx}_{len(state['bar_series'])}"
+            dpg.add_bar_series([], [], weight=weight, tag=tag, parent="plot_y")
+            dpg.bind_item_theme(tag, f"decay_theme_{tier_idx}")
+            state["bar_series"][key] = tag
+        else:
+            dpg.configure_item(tag, weight=weight)
+        return tag
+
     def refresh_plot() -> None:
         drained = controller.drain()
         for hop in drained:
-            # x = center frequency, y = strength (dBm) -- baseline if no power.
-            plot_model.add(hop.center_hz / HZ_PER_MHZ, hop_plot_y(hop.power_dbm))
+            # x = center frequency, y = strength (dBm) -- baseline if no power;
+            # width = emission bandwidth so the bar spans the band it occupies.
+            plot_model.add(hop.center_hz / HZ_PER_MHZ, hop_plot_y(hop.power_dbm),
+                           hop.width_hz / HZ_PER_MHZ)
         latest = drained[-1] if drained else None
         if latest is not None:
             dpg.set_value("status_text", latest.line())
         now = time.monotonic()
         floor = state.get("y_floor", 0.0)
-        # Each tier has a fixed alpha (set once when its theme is built); bars
-        # migrate between tiers as they age, so we only update series *data*.
-        # decay_to=floor makes each bar sink toward the floor as it ages; we
-        # then shift by the floor so heights fall to 0 (bars rise from 0).
-        for i, (_alpha, xs, ys) in enumerate(plot_model.tiers(now, decay_to=floor)):
-            series = f"decay_series_{i}"
-            if dpg.does_item_exist(series):
-                dpg.set_value(series, [list(xs), [y - floor for y in ys]])
+        min_width = state.get("min_bar_width", 0.0)
+        # Group by (age tier, bar width): each tier's theme fixes the alpha, and
+        # each group's weight is its bandwidth (floored to min_width). decay_to=
+        # floor sinks bars toward the floor as they age; we then shift by the
+        # floor so heights fall to 0 (bars rise from 0).
+        used = set()
+        for tier_idx, weight, xs, ys in plot_model.bars(now, decay_to=floor,
+                                                         min_width=min_width):
+            tag = ensure_bar_series(tier_idx, weight)
+            dpg.set_value(tag, [list(xs), [y - floor for y in ys]])
+            used.add(tag)
+        # Empty any series that held bars last frame but not this one.
+        for tag in state["bar_series"].values():
+            if tag not in used:
+                dpg.set_value(tag, [[], []])
         # Reflect a worker that stopped on its own (duration/iterations/error).
         if not controller.running and dpg.get_item_label("run_button") == "Stop":
             set_running_ui(False)
@@ -859,25 +928,22 @@ def run_gui(session: Optional[Session] = None) -> None:
                 with dpg.plot(label="Live spectrum -- strength vs frequency (fading)",
                               height=-1, width=-1):
                     dpg.add_plot_axis(dpg.mvXAxis, label="frequency (MHz)", tag="plot_x")
-                    with dpg.plot_axis(dpg.mvYAxis, label="strength (dBm)",
-                                       tag="plot_y"):
-                        # Dimmest (oldest) tier first so the freshest bars draw
-                        # on top when they overlap at the same frequency.
-                        for i in reversed(range(plot_model.tier_count)):
-                            dpg.add_bar_series([], [], weight=1.0,
-                                               tag=f"decay_series_{i}")
+                    # Bar series are created lazily per (age tier, bandwidth) as
+                    # hops arrive (see ensure_bar_series); the axis starts empty.
+                    dpg.add_plot_axis(dpg.mvYAxis, label="strength (dBm)",
+                                      tag="plot_y")
 
     # Per-tier themes: newest tiers brightest. Each tier has a fixed bar-fill
-    # alpha; bars migrate between tiers as they age, so the column fades.
+    # alpha; bars migrate between tiers as they age, so the column fades. Bound
+    # to each bar_series as it is created in ensure_bar_series.
     for i in range(plot_model.tier_count):
         alpha = int(((plot_model.tier_count - i) / plot_model.tier_count) * 255)
-        with dpg.theme(tag=f"decay_theme_{i}") as theme_id:
+        with dpg.theme(tag=f"decay_theme_{i}"):
             with dpg.theme_component(dpg.mvBarSeries):
                 dpg.add_theme_color(dpg.mvPlotCol_Fill, (80, 170, 255, alpha),
                                     category=dpg.mvThemeCat_Plots)
                 dpg.add_theme_color(dpg.mvPlotCol_Line, (80, 170, 255, alpha),
                                     category=dpg.mvThemeCat_Plots)
-        dpg.bind_item_theme(f"decay_series_{i}", theme_id)
 
     # File dialogs.
     with dpg.file_dialog(directory_selector=False, show=False, tag="save_dialog",

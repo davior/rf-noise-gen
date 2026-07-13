@@ -131,6 +131,43 @@ def test_decay_tiers_stable_length():
     assert len(model.tiers(now=0.0)) == 6
 
 
+def test_bars_use_true_bandwidth_when_wider_than_min():
+    # A point wider than the min renders at its own bandwidth.
+    model = gui.DecayPlotModel(decay_window=10.0, tier_count=6)
+    model.add(100.0, -10.0, width=4.0, now=0.0)  # 4 MHz wide band
+    groups = model.bars(now=0.0, min_width=0.5)
+    assert len(groups) == 1
+    _tier, weight, xs, _ys = groups[0]
+    assert weight == 4.0
+    assert xs == [100.0]
+
+
+def test_bars_floor_narrow_bandwidth_to_min_width():
+    # A very narrow (or width-less) point is clamped up to min_width.
+    model = gui.DecayPlotModel(decay_window=10.0, tier_count=6)
+    model.add(100.0, -10.0, width=0.001, now=0.0)  # 1 kHz -> too thin to see
+    model.add(200.0, -10.0, now=0.0)               # no width supplied at all
+    groups = model.bars(now=0.0, min_width=0.5)
+    assert {round(w, 6) for _t, w, _xs, _ys in groups} == {0.5}
+
+
+def test_bars_split_series_by_width_within_a_tier():
+    # Two same-age points with different bandwidths must be separate groups
+    # (ImPlot allows only one bar width per series).
+    model = gui.DecayPlotModel(decay_window=10.0, tier_count=6)
+    model.add(100.0, -10.0, width=1.0, now=0.0)
+    model.add(200.0, -10.0, width=5.0, now=0.0)
+    groups = model.bars(now=0.0, min_width=0.1)
+    weights = sorted(w for _t, w, _xs, _ys in groups)
+    assert weights == [1.0, 5.0]
+
+
+def test_bars_omit_fully_decayed_points():
+    model = gui.DecayPlotModel(decay_window=10.0, tier_count=6)
+    model.add(100.0, -10.0, width=1.0, now=0.0)
+    assert model.bars(now=11.0, min_width=0.1) == []
+
+
 def test_decay_tiers_y_falls_toward_floor():
     """With decay_to set, a point's y sinks from its value to the floor."""
     model = gui.DecayPlotModel(decay_window=10.0, tier_count=6)
