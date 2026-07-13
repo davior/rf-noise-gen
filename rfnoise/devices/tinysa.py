@@ -132,6 +132,7 @@ class TinySAUltra(RFDevice):
     def __init__(self, port: Optional[str] = None, mode: str = "sweep",
                  level: float = -30.0, default_band_width: Optional[int] = None,
                  baudrate: int = 115200, output_stage: str = "auto",
+                 debug: bool = False,
                  reconnect_attempts: int = _RECONNECT_ATTEMPTS,
                  reconnect_delay: float = _RECONNECT_DELAY_S, **options):
         super().__init__(**options)
@@ -146,15 +147,21 @@ class TinySAUltra(RFDevice):
         # Which RF output path to use. "auto" picks normal/mixer by frequency;
         # force "normal" or "mixer" if the auto boundary is wrong for your unit.
         self.output_stage = output_stage
+        # When True, log every command sent + the device's response + timing to
+        # stderr (for diagnosing which command the firmware rejects or stalls on).
+        self.debug = bool(debug)
         # How hard to try to recover when the device drops off USB mid-run.
         # ``reconnect_attempts <= 0`` disables recovery (fail fast instead).
         self.reconnect_attempts = int(reconnect_attempts)
         self.reconnect_delay = float(reconnect_delay)
         self._reconnecting = False
-        # Last output path sent / whether modulation is currently on, so we only
-        # re-send those commands when they actually change hop to hop.
+        # State so we only re-send a command when it actually changes hop to hop
+        # (fewer serial round-trips -> faster, less chance of overflow).
         self._stage: Optional[str] = None
         self._mod_on = False
+        self._last_level: Optional[int] = None
+        self._last_sweeptime: Optional[float] = None
+        self._output_armed = False
         if default_band_width is None:
             default_band_width = 1_000_000 if mode == "sweep" else 100_000
         self.capabilities = DeviceCapabilities(
@@ -182,7 +189,10 @@ class TinySAUltra(RFDevice):
         self._serial = None
 
     def _set_level(self, dbm: float) -> None:
-        self._send(_COMMANDS["level"].format(dbm=int(round(self.capabilities.clamp_power(dbm)))))
+        lvl = int(round(self.capabilities.clamp_power(dbm)))
+        if lvl != self._last_level:
+            self._send(_COMMANDS["level"].format(dbm=lvl))
+            self._last_level = lvl
 
     def _open_serial(self, port: str):
         """Open the serial port (split out so reconnect/tests can reuse it)."""
@@ -204,6 +214,9 @@ class TinySAUltra(RFDevice):
         self._send(_COMMANDS["mod_off"])
         self._mod_on = False
         self._stage = None
+        self._last_level = None
+        self._last_sweeptime = None
+        self._output_armed = False
         self._set_level(self.level)
 
     def _stage_for(self, hz: int) -> str:
@@ -221,11 +234,23 @@ class TinySAUltra(RFDevice):
             self._stage = stage
 
     def _set_sweeptime(self, dwell_s: float) -> None:
-        """Set the firmware sweep duration to the dwell (clamped to 3ms..60s)."""
+        """Set the firmware sweep duration to the dwell (clamped to 3ms..60s).
+
+        Only re-sent when it changes -- the dwell is constant within a session,
+        so this is effectively a one-time command.
+        """
         if dwell_s <= 0:
             return
-        seconds = max(0.003, min(60.0, float(dwell_s)))
-        self._send(_COMMANDS["sweeptime"].format(seconds=seconds))
+        seconds = round(max(0.003, min(60.0, float(dwell_s))), 3)
+        if seconds != self._last_sweeptime:
+            self._send(_COMMANDS["sweeptime"].format(seconds=seconds))
+            self._last_sweeptime = seconds
+
+    def _ensure_output_on(self) -> None:
+        """Enable RF output once; it stays on across hops."""
+        if not self._output_armed:
+            self._send(_COMMANDS["output_on"])
+            self._output_armed = True
 
     def _clear_modulation(self) -> None:
         if self._mod_on:
@@ -351,6 +376,7 @@ class TinySAUltra(RFDevice):
     def _send(self, command: str) -> None:
         if self._serial is None:  # pragma: no cover - guarded by open()
             raise DeviceError("tinySA: serial port not open")
+        t0 = time.monotonic()
         try:
             self._write_flush(command)
         except Exception as exc:
@@ -371,27 +397,35 @@ class TinySAUltra(RFDevice):
                     ) from exc2
             else:
                 raise
-        self._drain()
+        response = self._drain()
+        if self.debug:
+            import sys
+            dt_ms = (time.monotonic() - t0) * 1000.0
+            sys.stderr.write(
+                f"[tinysa] >> {command.strip()!r}  ({dt_ms:.0f} ms)  "
+                f"<< {response[:120]!r}\n"
+            )
+            sys.stderr.flush()
 
-    def _drain(self) -> None:
-        """Consume the shell's echo/response so the input buffer never fills.
+    def _drain(self) -> bytes:
+        """Consume and return the shell's echo/response after a command.
 
         The tinySA echoes every command and follows it with a ``ch>`` prompt.
-        Nothing here needs that text, but if it is never read the OS input
-        buffer (~4 KB) fills after a hundred-odd hops, back-pressures the port,
-        and the next write blocks forever. Reading up to the prompt after each
+        If it is never read the OS input buffer (~4 KB) fills, back-pressures
+        the port, and the next write blocks. Reading up to the prompt after each
         command keeps the buffer empty; the serial read timeout bounds the wait
-        if a firmware revision omits the prompt.
+        if a firmware revision omits the prompt. Returned bytes feed debug logs.
         """
         if self._serial is None:  # pragma: no cover - guarded by callers
-            return
-        self._serial.read_until(_PROMPT)
+            return b""
+        data = self._serial.read_until(_PROMPT) or b""
         # Backstop: if a firmware revision's prompt/output doesn't match
         # ``ch> `` exactly, ``read_until`` stops at the read timeout with bytes
         # still queued. Clear them so nothing carries into the next write.
         reset = getattr(self._serial, "reset_input_buffer", None)
         if reset is not None:
             reset()
+        return data
 
     def _dwell(self, seconds: float) -> None:
         """Wait out the dwell while draining anything the device streams.
@@ -488,7 +522,7 @@ class TinySAUltra(RFDevice):
             self._send(_COMMANDS["sweep"].format(start=int(sweep.start_hz),
                                                  stop=int(sweep.stop_hz)))
             self._set_sweeptime(emission.dwell_s)
-            self._send(_COMMANDS["output_on"])
+            self._ensure_output_on()
             self._dwell(emission.dwell_s)
             return
         super().emit(emission)
@@ -521,7 +555,7 @@ class TinySAUltra(RFDevice):
             self._send(_COMMANDS["mod_deviation"].format(hz=deviation))
             self._send(_COMMANDS["mod_fm"])
         self._mod_on = True
-        self._send(_COMMANDS["output_on"])
+        self._ensure_output_on()
         self._dwell(emission.dwell_s)
 
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
@@ -536,5 +570,5 @@ class TinySAUltra(RFDevice):
         else:
             self._send(_COMMANDS["sweep"].format(start=int(start_hz), stop=int(stop_hz)))
             self._set_sweeptime(dwell_s)
-        self._send(_COMMANDS["output_on"])
+        self._ensure_output_on()
         self._dwell(dwell_s)
