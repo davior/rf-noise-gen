@@ -25,6 +25,7 @@ class HopStatus:
     power_dbm: Optional[float]
     dwell_s: float
     elapsed_s: float
+    traversal: str = "random_hop"   # tuning mode driving the hop sequence
 
     @property
     def center_hz(self) -> int:
@@ -40,8 +41,10 @@ class HopStatus:
         # first hop reads 0.0 rather than a spike from near-zero elapsed time.
         completed = max(0, self.index - 1)
         rate = completed / self.elapsed_s if self.elapsed_s > 0 else 0.0
+        # Compact glyph for the tuning mode: sweep vs random hop.
+        mode = "↑" if self.traversal == "sequential" else "⟳"
         return (
-            f"⟳ {format_freq(self.center_hz):>10}  "
+            f"{mode} {format_freq(self.center_hz):>10}  "
             f"band {format_freq(self.start_hz)}-{format_freq(self.stop_hz)}  "
             f"{power:>10}  hop {self.index}  "
             f"{_fmt_clock(self.elapsed_s)}  {rate:.1f} hop/s"

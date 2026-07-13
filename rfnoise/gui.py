@@ -88,6 +88,9 @@ SETTING_TIPS: Dict[str, str] = {
     "f_overlap": "Fractional overlap between adjacent hop bandwidths "
                  "(0 = none, 0.5 = 50%). Higher values pack hops closer "
                  "together for denser coverage.",
+    "f_traversal": "How the frequency moves between hops. 'random_hop' picks a "
+                   "random band each time; 'sequential' sweeps every band in "
+                   "order from lowest to highest, then repeats.",
     "f_seed": "Seed for the random hop sequence. Leave blank for a fresh "
               "random pattern each run; set a value to reproduce the exact "
               "same sequence.",
@@ -188,6 +191,7 @@ def collect_session(values: Dict[str, Any], rows: List[Dict[str, str]],
         ranges=ranges,
         dwell_seconds=float(values.get("dwell", 0.5) or 0.5),
         overlap=float(values.get("overlap", 0.0) or 0.0),
+        traversal=values.get("traversal") or "random_hop",
         seed=_parse_optional_int(values.get("seed", "")),
         pause_seconds=float(values.get("pause_seconds", 0.0) or 0.0),
         pause_every_hops=int(values.get("pause_every", 0) or 0),
@@ -202,6 +206,7 @@ def session_to_form(session: Session) -> Tuple[Dict[str, Any], List[Dict[str, st
         "name": session.name,
         "dwell": session.dwell_seconds,
         "overlap": session.overlap,
+        "traversal": session.traversal.value,
         "seed": "" if session.seed is None else str(session.seed),
         "pause_seconds": session.pause_seconds,
         "pause_every": session.pause_every_hops,
@@ -599,6 +604,7 @@ def run_gui(session: Optional[Session] = None) -> None:
             "name": dpg.get_value("f_name"),
             "dwell": dpg.get_value("f_dwell"),
             "overlap": dpg.get_value("f_overlap"),
+            "traversal": dpg.get_value("f_traversal"),
             "seed": dpg.get_value("f_seed"),
             "pause_seconds": dpg.get_value("f_pause_seconds"),
             "pause_every": dpg.get_value("f_pause_every"),
@@ -679,6 +685,7 @@ def run_gui(session: Optional[Session] = None) -> None:
         dpg.set_value("f_name", values["name"])
         dpg.set_value("f_dwell", float(values["dwell"]))
         dpg.set_value("f_overlap", float(values["overlap"]))
+        dpg.set_value("f_traversal", values["traversal"])
         dpg.set_value("f_seed", values["seed"])
         dpg.set_value("f_pause_seconds", float(values["pause_seconds"]))
         dpg.set_value("f_pause_every", int(values["pause_every"]))
@@ -864,6 +871,10 @@ def run_gui(session: Optional[Session] = None) -> None:
                 dpg.add_input_float(label="overlap", tag="f_overlap",
                                     default_value=session.overlap, width=160, step=0)
                 add_tip("f_overlap", SETTING_TIPS["f_overlap"])
+                dpg.add_combo(["random_hop", "sequential"], label="tuning mode",
+                              tag="f_traversal", default_value=session.traversal.value,
+                              width=200)
+                add_tip("f_traversal", SETTING_TIPS["f_traversal"])
                 dpg.add_input_text(label="seed (blank=random)", tag="f_seed",
                                    default_value="" if session.seed is None else str(session.seed),
                                    width=160)

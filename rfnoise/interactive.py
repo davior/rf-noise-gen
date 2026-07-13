@@ -12,6 +12,7 @@ from typing import Optional
 
 from . import session as session_store
 from .devices import create_device, device_keys, get_device_class
+from .devices.base import Traversal
 from .engine import ConfigurationError, NoiseGenerator, validate
 from .freq import format_freq, parse_freq
 from .model import FrequencyRange, Session
@@ -140,6 +141,15 @@ def _edit_device_options(session: Session) -> None:
         print("  note: RTL-SDR is receive-only and cannot run a broadcast session.")
 
 
+def _edit_traversal(session: Session) -> None:
+    print("  tuning mode -- how the frequency moves between hops:")
+    print("    [r] random-hop (default)   [s] sequential sweep (low to high)")
+    current = "s" if session.traversal == Traversal.SEQUENTIAL else "r"
+    choice = _prompt("  mode (r/s)", current).lower()
+    session.traversal = (Traversal.SEQUENTIAL if choice.startswith("s")
+                         else Traversal.RANDOM_HOP)
+
+
 def _edit_pause(session: Session) -> None:
     print("  periodic pause -- 0 hops disables it")
     every = _prompt_float("  pause every N hops (0 = never)",
@@ -208,6 +218,7 @@ def _summary(session: Session) -> str:
         pause = f"  pause={session.pause_seconds:g}s/{session.pause_every_hops}hops"
     return (
         f"name={session.name}  device={session.device}  "
+        f"mode={session.traversal.value}  "
         f"ranges={len(session.ranges)}  dwell={session.dwell_seconds}s{pause}{power}"
     )
 
@@ -233,6 +244,7 @@ def run_interactive(session: Optional[Session] = None) -> None:
             seed = _prompt("random seed (blank = none)",
                            "" if session.seed is None else str(session.seed))
             session.seed = int(seed) if seed.strip() else None
+            _edit_traversal(session)
             _edit_pause(session)
             _edit_power(session)
         elif choice == "5":
