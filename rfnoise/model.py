@@ -76,6 +76,11 @@ class Session:
     dwell_seconds: float = 0.5
     overlap: float = 0.0  # 0 = sequential bands; 0<overlap<1 = fractional overlap
     seed: Optional[int] = None
+    # Optional periodic pause: hold transmission for ``pause_seconds`` after
+    # every ``pause_every_hops`` hops. Both must be > 0 to take effect
+    # (``pause_every_hops`` = 0 disables it).
+    pause_seconds: float = 0.0
+    pause_every_hops: int = 0
     # Optional random output-level range in dBm; when both are set, each hop
     # broadcasts at a random level drawn uniformly from [min, max].
     power_min_dbm: Optional[float] = None
@@ -85,10 +90,20 @@ class Session:
         if self.power_min_dbm is not None and self.power_max_dbm is not None:
             if self.power_max_dbm < self.power_min_dbm:
                 raise ValueError("power_max_dbm must be >= power_min_dbm")
+        self.pause_seconds = float(self.pause_seconds)
+        self.pause_every_hops = int(self.pause_every_hops)
+        if self.pause_seconds < 0:
+            raise ValueError("pause_seconds must be >= 0")
+        if self.pause_every_hops < 0:
+            raise ValueError("pause_every_hops must be >= 0")
 
     @property
     def has_power_range(self) -> bool:
         return self.power_min_dbm is not None and self.power_max_dbm is not None
+
+    @property
+    def has_pause(self) -> bool:
+        return self.pause_every_hops > 0 and self.pause_seconds > 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -99,6 +114,8 @@ class Session:
             "dwell_seconds": self.dwell_seconds,
             "overlap": self.overlap,
             "seed": self.seed,
+            "pause_seconds": self.pause_seconds,
+            "pause_every_hops": self.pause_every_hops,
             "power_min_dbm": self.power_min_dbm,
             "power_max_dbm": self.power_max_dbm,
         }
@@ -113,6 +130,8 @@ class Session:
             dwell_seconds=float(data.get("dwell_seconds", 0.5)),
             overlap=float(data.get("overlap", 0.0)),
             seed=data.get("seed"),
+            pause_seconds=float(data.get("pause_seconds", 0.0)),
+            pause_every_hops=int(data.get("pause_every_hops", 0)),
             power_min_dbm=data.get("power_min_dbm"),
             power_max_dbm=data.get("power_max_dbm"),
         )

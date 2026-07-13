@@ -17,6 +17,8 @@ def _sample_session():
         ],
         dwell_seconds=0.25,
         seed=7,
+        pause_seconds=2.0,
+        pause_every_hops=10,
         power_min_dbm=-60.0,
         power_max_dbm=-30.0,
     )
@@ -32,12 +34,35 @@ def test_save_load_round_trip(tmp_path):
     assert loaded.power_min_dbm == -60.0
     assert loaded.power_max_dbm == -30.0
     assert loaded.has_power_range
+    assert loaded.pause_seconds == 2.0
+    assert loaded.pause_every_hops == 10
+    assert loaded.has_pause
 
 
 def test_power_range_defaults_none():
     from rfnoise.model import Session
     s = Session()
     assert s.power_min_dbm is None and not s.has_power_range
+
+
+def test_pause_defaults_disabled():
+    s = Session()
+    assert s.pause_seconds == 0.0 and s.pause_every_hops == 0
+    assert not s.has_pause
+
+
+def test_load_tolerates_missing_pause_keys(tmp_path):
+    # Older session files without pause_* keys must still load (defaults).
+    import json
+    data = _sample_session().to_dict()
+    del data["pause_seconds"]
+    del data["pause_every_hops"]
+    path = os.path.join(tmp_path, "legacy.json")
+    with open(path, "w") as fh:
+        json.dump({"schema_version": 1, "session": data}, fh)
+    loaded = session_store.load(path)
+    assert loaded.pause_seconds == 0.0 and loaded.pause_every_hops == 0
+    assert not loaded.has_pause
 
 
 def test_power_range_rejects_inverted():

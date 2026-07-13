@@ -17,7 +17,8 @@ several RF devices through a common abstraction layer.
 - **Auto-derived maximum broadcast bandwidth.** You don't enter a max bandwidth
   per range; the selected device supplies it (see below). You *may* still set a
   per-range override to go narrower.
-- **Configurable dwell time** with seamless (no-pause) switching.
+- **Configurable dwell time** with seamless switching by default, plus an
+  optional periodic pause (hold transmission for X seconds every N hops).
 - **Random broadcast strength.** Optionally give a dBm range and each hop
   transmits at a random level drawn from it (see below).
 - **Live run status.** While running, a status line shows the current frequency,
@@ -60,6 +61,21 @@ so seeded runs stay reproducible). The level is applied per device:
 The drawn level is always clamped into the device's supported range. If a
 session sets a strength range but the device can't control its level, the range
 is ignored with a warning.
+
+## Periodic pause
+
+By default hops are seamless. Set `pause_every_hops` and `pause_seconds` on a
+session and the generator holds transmission for `pause_seconds` after every
+`pause_every_hops` hops — useful for duty-cycling the transmitter or leaving a
+quiet window for other equipment. The pause is active only when both values are
+> 0; `pause_every_hops = 0` disables it. The pause stays responsive to Ctrl-C
+and to `--duration`, so a run still stops promptly even mid-pause.
+
+Override a saved session at run time with the `run` flags:
+
+```
+rfnoise run session.json --pause-every 10 --pause-seconds 2
+```
 
 ## Live run status
 
@@ -234,6 +250,7 @@ session = Session(
     ranges=[FrequencyRange(88_000_000, 108_000_000)],  # no bandwidth = device auto
     dwell_seconds=0.25,
     power_min_dbm=-60, power_max_dbm=-30,              # random strength per hop
+    pause_seconds=2, pause_every_hops=10,             # pause 2s every 10 hops
     seed=42,
 )
 gen = NoiseGenerator(create_device("mock"), session)

@@ -68,6 +68,10 @@ def _cmd_run(args) -> int:
     session = session_store.load(args.session)
     if args.device:
         session.device = args.device
+    if args.pause_seconds is not None:
+        session.pause_seconds = args.pause_seconds
+    if args.pause_every is not None:
+        session.pause_every_hops = args.pause_every
     opts = dict(session.device_options)
     if session.device == "mock":
         opts.setdefault("sleep", not args.dry_run)
@@ -92,8 +96,12 @@ def _cmd_run(args) -> int:
     power = ""
     if session.has_power_range:
         power = f", power {session.power_min_dbm:g}..{session.power_max_dbm:g} dBm"
+    pause = ""
+    if session.has_pause:
+        pause = (f", pause {session.pause_seconds:g}s every "
+                 f"{session.pause_every_hops} hops")
     print(f"running '{session.name}' on {device.name}: "
-          f"{len(gen.bands)} bands, dwell {session.dwell_seconds}s{power}")
+          f"{len(gen.bands)} bands, dwell {session.dwell_seconds}s{power}{pause}")
     reporter.start()
     import time as _time
     t0 = _time.monotonic()
@@ -129,6 +137,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--device", choices=device_keys(), help="override device")
     p_run.add_argument("--duration", type=float, help="seconds to run")
     p_run.add_argument("--iterations", type=int, help="number of hops")
+    p_run.add_argument("--pause-seconds", type=float,
+                       help="override session pause length (seconds)")
+    p_run.add_argument("--pause-every", type=int,
+                       help="override session pause interval (hops); 0 disables")
     p_run.add_argument("--dry-run", action="store_true",
                        help="print the hop schedule without transmitting")
     p_run.add_argument("--log", action="store_true",

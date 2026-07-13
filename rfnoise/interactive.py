@@ -140,6 +140,18 @@ def _edit_device_options(session: Session) -> None:
         print("  note: RTL-SDR is receive-only and cannot run a broadcast session.")
 
 
+def _edit_pause(session: Session) -> None:
+    print("  periodic pause -- 0 hops disables it")
+    every = _prompt_float("  pause every N hops (0 = never)",
+                          float(session.pause_every_hops))
+    session.pause_every_hops = max(0, int(every))
+    if session.pause_every_hops > 0:
+        session.pause_seconds = max(0.0, _prompt_float("  pause length (seconds)",
+                                                       session.pause_seconds))
+    else:
+        session.pause_seconds = 0.0
+
+
 def _edit_power(session: Session) -> None:
     print("  random broadcast strength (dBm) -- blank both to disable")
     lo = _prompt("  min dBm",
@@ -191,9 +203,12 @@ def _summary(session: Session) -> str:
     power = ""
     if session.has_power_range:
         power = f"  power={session.power_min_dbm:g}..{session.power_max_dbm:g}dBm"
+    pause = ""
+    if session.has_pause:
+        pause = f"  pause={session.pause_seconds:g}s/{session.pause_every_hops}hops"
     return (
         f"name={session.name}  device={session.device}  "
-        f"ranges={len(session.ranges)}  dwell={session.dwell_seconds}s{power}"
+        f"ranges={len(session.ranges)}  dwell={session.dwell_seconds}s{pause}{power}"
     )
 
 
@@ -218,6 +233,7 @@ def run_interactive(session: Optional[Session] = None) -> None:
             seed = _prompt("random seed (blank = none)",
                            "" if session.seed is None else str(session.seed))
             session.seed = int(seed) if seed.strip() else None
+            _edit_pause(session)
             _edit_power(session)
         elif choice == "5":
             path = session_store.default_path_for(session.name)
