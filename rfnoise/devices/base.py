@@ -9,9 +9,10 @@ not enter a max bandwidth per range; the device supplies it.
 
 from __future__ import annotations
 
+import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import FrozenSet, Optional, Tuple
 
 from ..freq import format_freq
 
@@ -22,6 +23,60 @@ class DeviceError(Exception):
 
 class TransmitNotSupported(DeviceError):
     """Raised when transmit is attempted on a receive-only device."""
+
+
+# -- signal-generator axes --------------------------------------------------
+# Three independent axes decouple *how the frequency moves* (Traversal) from
+# *what rides on the carrier* (Modulation) and *what drives the modulation*
+# (ModSource). Today's tool is exactly ``RANDOM_HOP x NONE x -``; later phases
+# add sequential/sweep traversals and AM/FM. Devices advertise which values
+# they support via :class:`DeviceCapabilities`.
+
+
+class Modulation(enum.Enum):
+    """What rides on the carrier. ``NONE`` is today's plain (CW/noise) output."""
+
+    NONE = "none"
+    AM = "am"
+    FM = "fm"
+
+
+class ModSource(enum.Enum):
+    """What drives AM/FM modulation (Phase 3)."""
+
+    TONE = "tone"
+    NOISE = "noise"
+
+
+class Traversal(enum.Enum):
+    """How the centre frequency moves over time. ``RANDOM_HOP`` is today's."""
+
+    RANDOM_HOP = "random_hop"
+    SEQUENTIAL = "sequential"
+    SWEEP_IN_BAND = "sweep_in_band"
+
+
+@dataclass(frozen=True)
+class Emission:
+    """One thing to emit: a band, for a dwell, with optional modulation.
+
+    The engine builds one :class:`Emission` per hop and hands it to
+    :meth:`RFDevice.emit`. Frequency is expressed as ``start_hz``/``stop_hz``
+    (matching the existing :meth:`RFDevice.broadcast` contract), not a
+    centre+bandwidth. Modulation fields are all ``None``/``NONE`` today; they
+    carry AM/FM parameters once Phase 3 lands. (Intra-band ``sweep`` params are
+    added in Phase 2.)
+    """
+
+    start_hz: int
+    stop_hz: int
+    dwell_s: float
+    power_dbm: Optional[float] = None
+    modulation: Modulation = Modulation.NONE
+    source: Optional[ModSource] = None
+    deviation_hz: Optional[float] = None   # FM peak deviation
+    depth: Optional[float] = None          # AM depth, 0..1
+    tone_hz: Optional[float] = None        # source=TONE frequency
 
 
 @dataclass(frozen=True)
@@ -61,6 +116,19 @@ class DeviceCapabilities:
     # either bound means the device cannot control its output level.
     power_min_dbm: Optional[float] = None
     power_max_dbm: Optional[float] = None
+    # -- signal-generator axes (declarative; the user never configures what the
+    # hardware already knows). Defaults describe *today's* behavior so existing
+    # devices need no change until they gain new abilities. --
+    #: Traversal strategies this device can run. Every device can random-hop.
+    supported_traversals: FrozenSet["Traversal"] = frozenset({Traversal.RANDOM_HOP})
+    #: Modulations this device can emit. Today every device is CW/noise only.
+    supported_modulations: FrozenSet["Modulation"] = frozenset({Modulation.NONE})
+    #: Widest phase-continuous IQ chirp the device can emit in one tune (Phase
+    #: 3); ``None`` means it has no IQ-generation path.
+    instantaneous_bw_hz: Optional[int] = None
+    #: How faithfully the device modulates: ``"iq"`` (arbitrary IQ),
+    #: ``"fixed_tone"`` (crude built-in generator) or ``"none"``.
+    modulation_fidelity: str = "none"
 
     @property
     def controls_power(self) -> bool:
@@ -148,6 +216,18 @@ class RFDevice(ABC):
 
     def _on_close(self) -> None:  # pragma: no cover - trivial default
         pass
+
+    def emit(self, emission: "Emission") -> None:
+        """Emit one :class:`Emission`; the engine's single per-hop entry point.
+
+        The base implementation ignores the modulation fields and forwards the
+        band/dwell/power to :meth:`broadcast`, so today every device behaves
+        exactly as before (all emissions are ``Modulation.NONE``). Devices that
+        gain real modulation (Phase 3) override this to read the modulation
+        parameters; devices that only ever do CW/noise never need to.
+        """
+        self.broadcast(emission.start_hz, emission.stop_hz,
+                       emission.dwell_s, emission.power_dbm)
 
     @abstractmethod
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,

@@ -1,16 +1,15 @@
-"""Band splitting and random band selection.
+"""Band splitting math.
 
 A range is divided into consecutive slices ("bands") no wider than the effective
-maximum bandwidth. The selector pools the bands from *all* ranges and picks one
-uniformly at random on every hop, matching the spec's "select a random slice
-from ALL ranges each time".
+maximum bandwidth. *Selecting* which band to emit next is a tuning strategy and
+lives in :mod:`rfnoise.tuning`; the original ``RandomBandSelector`` name is still
+importable from here for backwards compatibility (see :func:`__getattr__`).
 """
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Any, List, Optional, Sequence
 
 from .model import FrequencyRange
 
@@ -86,23 +85,15 @@ def build_bands(ranges: Sequence[FrequencyRange], device_max: Optional[int],
     return pool
 
 
-class RandomBandSelector:
-    """Uniformly selects a band from a fixed pool.
+def __getattr__(name: str) -> Any:
+    """Lazily re-export ``RandomBandSelector`` from :mod:`rfnoise.tuning`.
 
-    Pass ``rng`` to share a single :class:`random.Random` with the engine (so
-    band and power draws come from the same reproducible stream), or ``seed`` to
-    let the selector own its RNG.
+    The selector moved to ``tuning.py`` (which imports :class:`Band` from here),
+    so a top-level import would be circular. Resolving it on attribute access
+    keeps ``from rfnoise.bands import RandomBandSelector`` working without the
+    cycle.
     """
-
-    def __init__(self, bands: Sequence[Band], seed: Optional[int] = None,
-                 rng: Optional[random.Random] = None):
-        if not bands:
-            raise ValueError("cannot select from an empty band pool")
-        self._bands = list(bands)
-        self._rng = rng if rng is not None else random.Random(seed)
-
-    def __len__(self) -> int:
-        return len(self._bands)
-
-    def next(self) -> Band:
-        return self._rng.choice(self._bands)
+    if name == "RandomBandSelector":
+        from .tuning import RandomPooledStrategy
+        return RandomPooledStrategy
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

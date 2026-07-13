@@ -6,11 +6,12 @@ import random
 import time
 from typing import Callable, List, Optional
 
-from .bands import Band, RandomBandSelector, build_bands
-from .devices.base import RFDevice
+from .bands import Band, build_bands
+from .devices.base import Emission, RFDevice
 from .freq import format_freq
 from .model import Session
 from .status import HopStatus
+from .tuning import RandomPooledStrategy
 
 
 class ConfigurationError(Exception):
@@ -72,7 +73,7 @@ class NoiseGenerator:
         self.bands = validate(session, device)
         # One RNG shared by band selection and power draws -> reproducible.
         self.rng = random.Random(session.seed)
-        self.selector = RandomBandSelector(self.bands, rng=self.rng)
+        self.selector = RandomPooledStrategy(self.bands, rng=self.rng)
         self.power_range = self._resolve_power_range()
         self._stopped = False
         self.hops = 0
@@ -160,7 +161,12 @@ class NoiseGenerator:
                         dwell_s=dwell,
                         elapsed_s=time.monotonic() - start,
                     ))
-                self.device.broadcast(band.start_hz, band.stop_hz, dwell, power)
+                self.device.emit(Emission(
+                    start_hz=band.start_hz,
+                    stop_hz=band.stop_hz,
+                    dwell_s=dwell,
+                    power_dbm=power,
+                ))
                 self.hops += 1
                 # Periodic pause: hold transmission after every N hops. Skipped
                 # once iterations are exhausted (the loop-top check ends the run

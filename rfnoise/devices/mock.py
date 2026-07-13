@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 from ..freq import format_freq
 from .base import DeviceCapabilities, RFDevice, TxBand
