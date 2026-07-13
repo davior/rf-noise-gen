@@ -108,12 +108,13 @@ class _FakeSerial:
     raise like a full-buffer write timeout.
     """
 
-    def __init__(self, echo_per_write=32, stall=False):
+    def __init__(self, echo_per_write=32, stall=False, trailing=b""):
         import serial
 
         self._serial_mod = serial
         self.echo_per_write = echo_per_write
         self.stall = stall
+        self.trailing = trailing  # bytes emitted after the prompt (async stream)
         self.in_buffer = b""
         self.writes = []
         self.closed = False
@@ -122,7 +123,7 @@ class _FakeSerial:
         if self.stall:
             raise self._serial_mod.SerialTimeoutException("write timeout")
         self.writes.append(data)
-        self.in_buffer += b"x" * self.echo_per_write + b"ch> "
+        self.in_buffer += b"x" * self.echo_per_write + b"ch> " + self.trailing
         return len(data)
 
     def flush(self):
@@ -137,6 +138,17 @@ class _FakeSerial:
         drained, self.in_buffer = self.in_buffer[:end], self.in_buffer[end:]
         return drained
 
+    @property
+    def in_waiting(self):
+        return len(self.in_buffer)
+
+    def read(self, size):
+        chunk, self.in_buffer = self.in_buffer[:size], self.in_buffer[size:]
+        return chunk
+
+    def reset_input_buffer(self):
+        self.in_buffer = b""
+
     def close(self):
         self.closed = True
 
@@ -149,6 +161,16 @@ def test_tinysa_drains_responses_so_buffer_does_not_grow():
     for _ in range(500):
         dev.broadcast(100_000_000, 101_000_000, 0.0)
     assert len(dev._serial.in_buffer) < 1024  # bounded regardless of hop count
+
+
+def test_tinysa_dwell_drains_streamed_data():
+    # A firmware that keeps streaming scan data after the prompt (``trailing``)
+    # would fill the input buffer during the dwell if nothing reads it. The
+    # dwell must drain the port so it stays empty.
+    dev = TinySAUltra(port="/dev/null", mode="sweep")
+    dev._serial = _FakeSerial(trailing=b"scan-data" * 200)
+    dev.broadcast(100_000_000, 101_000_000, 0.02)
+    assert dev._serial.in_buffer == b""
 
 
 def test_tinysa_send_raises_deviceerror_on_write_stall():

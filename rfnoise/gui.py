@@ -321,6 +321,16 @@ class RunController:
     def error(self) -> Optional[str]:
         return self._error
 
+    @property
+    def hops(self) -> int:
+        """Hops completed by the current/last run (0 before one starts).
+
+        Read from the generator so it stays correct even after the worker exits
+        -- e.g. to report how far a run got before a device error, rather than
+        overwriting that count with the error alone.
+        """
+        return self._gen.hops if self._gen is not None else 0
+
     def start(self, session: Session) -> None:
         """Build a device+generator and run it on a daemon thread.
 
@@ -707,7 +717,9 @@ def run_gui(session: Optional[Session] = None) -> None:
         if not controller.running and dpg.get_item_label("run_button") == "Stop":
             set_running_ui(False)
             if controller.error:
-                set_status(f"run error: {controller.error}")
+                # Keep the completed-hop count visible: the error is what
+                # stopped the run, but "how far did it get" is the useful detail.
+                set_status(f"run error after {controller.hops} hops: {controller.error}")
 
     # -- build the window -------------------------------------------------
     with dpg.window(tag="primary"):

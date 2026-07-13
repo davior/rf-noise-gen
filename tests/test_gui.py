@@ -216,6 +216,19 @@ def test_run_controller_start_stop_and_drain():
         assert hop.center_hz > 0
 
 
+def test_run_controller_reports_hops():
+    # Before a run there is no generator, so the count is 0; after one runs the
+    # count reflects the work done (surfaced on the error line in the GUI).
+    controller = gui.RunController()
+    assert controller.hops == 0
+    controller.start(_run_session())
+    deadline = time.monotonic() + 2.0
+    while controller.hops == 0 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    controller.stop()
+    assert controller.hops > 0
+
+
 def test_run_controller_setup_error_propagates():
     # A session with no ranges fails validation in NoiseGenerator's ctor.
     bad = Session(name="bad", device="mock", ranges=[])
