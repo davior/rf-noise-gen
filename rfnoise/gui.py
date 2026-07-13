@@ -626,6 +626,10 @@ def run_gui(session: Optional[Session] = None) -> None:
     def add_range_row(lower: str = "", upper: str = "", max_bw: str = "") -> None:
         row_id = f"row_{dpg.generate_uuid()}"
         state["row_ids"].append(row_id)
+        render_range_row(row_id, lower, upper, max_bw)
+
+    def render_range_row(row_id: str, lower: str = "", upper: str = "",
+                         max_bw: str = "") -> None:
         with dpg.table_row(parent="ranges_table", tag=row_id):
             dpg.add_input_text(tag=f"{row_id}_lower", default_value=lower, width=120)
             add_tip(f"{row_id}_lower", RANGE_TIPS["lower"])
@@ -635,7 +639,7 @@ def run_gui(session: Optional[Session] = None) -> None:
                                hint="auto", width=120)
             add_tip(f"{row_id}_maxbw", RANGE_TIPS["maxbw"])
             dpg.add_button(label="remove",
-                           callback=lambda s, a, u=row_id: remove_range_row(u))
+                           callback=on_remove_range_row, user_data=row_id)
 
     def remove_range_row(row_id: str) -> None:
         if row_id in state["row_ids"]:
@@ -643,9 +647,14 @@ def run_gui(session: Optional[Session] = None) -> None:
         if dpg.does_item_exist(row_id):
             dpg.delete_item(row_id)
 
+    def on_remove_range_row(sender, app_data, row_id) -> None:
+        remove_range_row(row_id)
+
     def clear_ranges() -> None:
         for row_id in list(state["row_ids"]):
-            remove_range_row(row_id)
+            if dpg.does_item_exist(row_id):
+                dpg.delete_item(row_id)
+        state["row_ids"].clear()
 
     # -- device option sub-form ------------------------------------------
     def rebuild_device_options(preset: Optional[Dict[str, Any]] = None) -> None:
