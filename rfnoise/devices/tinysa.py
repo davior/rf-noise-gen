@@ -22,6 +22,7 @@ Output stage is chosen automatically by frequency:
 
 from __future__ import annotations
 
+import errno
 import time
 from typing import Optional
 
@@ -73,6 +74,28 @@ _PROMPT = b"ch> "
 # forever instead of raising.
 _WRITE_TIMEOUT_S = 2.0
 
+# OS errno values that mean "the device fell off the USB bus" (re-enumeration or
+# a brown-out, e.g. RF from our own transmit coupling into the USB). The port
+# node often reappears with the same name, so reopening it recovers the run.
+_DISCONNECT_ERRNOS = frozenset({errno.EIO, errno.ENODEV, errno.ENXIO, errno.EBADF})
+
+# Reconnect policy when the device drops mid-run.
+_RECONNECT_ATTEMPTS = 6
+_RECONNECT_DELAY_S = 0.5
+
+
+def _import_serial(required: bool = False):
+    """Return the pyserial module, ``None`` if absent (unless ``required``)."""
+    try:
+        import serial  # type: ignore
+        return serial
+    except ImportError as exc:  # pragma: no cover - depends on env
+        if required:
+            raise DeviceError(
+                "tinySA requires pyserial (pip install rfnoise[hardware])"
+            ) from exc
+        return None
+
 
 def _mode_for(hz: int) -> str:
     if hz <= 800_000_000:
@@ -96,7 +119,9 @@ class TinySAUltra(RFDevice):
 
     def __init__(self, port: Optional[str] = None, mode: str = "sweep",
                  level: float = -30.0, default_band_width: Optional[int] = None,
-                 baudrate: int = 115200, **options):
+                 baudrate: int = 115200,
+                 reconnect_attempts: int = _RECONNECT_ATTEMPTS,
+                 reconnect_delay: float = _RECONNECT_DELAY_S, **options):
         super().__init__(**options)
         if mode not in ("sweep", "cw"):
             raise ValueError("tinySA mode must be 'sweep' or 'cw'")
@@ -104,6 +129,11 @@ class TinySAUltra(RFDevice):
         self.mode = mode
         self.level = float(level)  # default output level in dBm
         self.baudrate = baudrate
+        # How hard to try to recover when the device drops off USB mid-run.
+        # ``reconnect_attempts <= 0`` disables recovery (fail fast instead).
+        self.reconnect_attempts = int(reconnect_attempts)
+        self.reconnect_delay = float(reconnect_delay)
+        self._reconnecting = False
         if default_band_width is None:
             default_band_width = 1_000_000 if mode == "sweep" else 100_000
         self.capabilities = DeviceCapabilities(
@@ -133,20 +163,23 @@ class TinySAUltra(RFDevice):
     def _set_level(self, dbm: float) -> None:
         self._send(_COMMANDS["level"].format(dbm=int(round(self.capabilities.clamp_power(dbm)))))
 
+    def _open_serial(self, port: str):
+        """Open the serial port (split out so reconnect/tests can reuse it)."""
+        serial = _import_serial(required=True)
+        return serial.Serial(
+            port, self.baudrate, timeout=1, write_timeout=_WRITE_TIMEOUT_S
+        )
+
+    def _arm_output(self) -> None:
+        """Set the output level and enable output (used on open and reconnect)."""
+        self._set_level(self.level)
+        self._send(_COMMANDS["output_on"])
+
     def _on_open(self) -> None:
         if not self.port:
             raise DeviceError("tinySA: no serial 'port' configured")
-        try:
-            import serial  # type: ignore
-        except ImportError as exc:  # pragma: no cover - depends on env
-            raise DeviceError(
-                "tinySA requires pyserial (pip install rfnoise[hardware])"
-            ) from exc
-        self._serial = serial.Serial(
-            self.port, self.baudrate, timeout=1, write_timeout=_WRITE_TIMEOUT_S
-        )
-        self._set_level(self.level)
-        self._send(_COMMANDS["output_on"])
+        self._serial = self._open_serial(self.port)
+        self._arm_output()
 
     def _on_close(self) -> None:
         if self._serial is not None:
@@ -157,26 +190,130 @@ class TinySAUltra(RFDevice):
             except DeviceError:
                 pass
             finally:
-                self._serial.close()
+                try:
+                    self._serial.close()
+                except Exception:  # pragma: no cover - already-dead port
+                    pass
                 self._serial = None
+
+    def _classify_error(self, exc: Exception) -> str:
+        """Bucket a serial error: ``"stall"``, ``"disconnect"`` or ``"other"``.
+
+        A *stall* is a write timeout (buffer full, device not draining); a
+        *disconnect* is the device dropping off USB (EIO/ENODEV, or a generic
+        ``SerialException``) -- recoverable by reopening the port.
+        """
+        serial = _import_serial()
+        if serial is not None and isinstance(exc, serial.SerialTimeoutException):
+            return "stall"
+        if isinstance(exc, OSError) and exc.errno in _DISCONNECT_ERRNOS:
+            return "disconnect"
+        if serial is not None and isinstance(exc, serial.SerialException):
+            return "disconnect"
+        return "other"
+
+    def _find_port(self) -> Optional[str]:
+        """Locate the device's port, preferring the configured path.
+
+        After a re-enumeration the node usually reappears under the same name,
+        but it can move (e.g. ``ttyACM0`` -> ``ttyACM1``); fall back to scanning
+        for a tinySA / CDC-ACM port so recovery still works if it does.
+        """
+        import os
+
+        if self.port and os.path.exists(self.port):
+            return self.port
+        try:
+            from serial.tools import list_ports  # type: ignore
+        except Exception:  # pragma: no cover - pyserial always ships this
+            return None
+        ports = list(list_ports.comports())
+        for p in ports:
+            text = f"{p.description or ''} {p.manufacturer or ''}".lower()
+            if "tinysa" in text:
+                return p.device
+        for p in ports:
+            dev = p.device or ""
+            if "ACM" in dev or "usbmodem" in dev:
+                return dev
+        return None
+
+    def _reconnect(self) -> None:
+        """Recover from a mid-run USB drop by reopening and re-arming the port.
+
+        Closes the stale handle, then retries find-port -> open -> re-arm output
+        up to ``reconnect_attempts`` times. Raises :class:`DeviceError` if the
+        device never comes back (truly unplugged / powered off).
+        """
+        if self.reconnect_attempts <= 0:
+            raise DeviceError(
+                "tinySA: device disconnected (I/O error); reconnect disabled. "
+                "Check USB power/cable and RF shielding."
+            )
+        old, self._serial = self._serial, None
+        if old is not None:
+            try:
+                old.close()
+            except Exception:  # pragma: no cover - already-dead port
+                pass
+        self._reconnecting = True
+        last: Optional[Exception] = None
+        try:
+            for _ in range(self.reconnect_attempts):
+                time.sleep(self.reconnect_delay)
+                port = self._find_port()
+                if not port:
+                    continue
+                try:
+                    self._serial = self._open_serial(port)
+                    self.port = port
+                    self._arm_output()
+                except Exception as exc:  # not back yet / still noisy
+                    last = exc
+                    if self._serial is not None:
+                        try:
+                            self._serial.close()
+                        except Exception:  # pragma: no cover
+                            pass
+                        self._serial = None
+                    continue
+                print(f"tinySA: reconnected on {port} after I/O error")
+                return
+        finally:
+            self._reconnecting = False
+        raise DeviceError(
+            f"tinySA: device did not come back after {self.reconnect_attempts} "
+            "reconnect attempts; check USB power/cable and RF shielding"
+            + (f" (last error: {last})" if last else "")
+        )
+
+    def _write_flush(self, command: str) -> None:
+        self._serial.write(command.encode("ascii"))
+        self._serial.flush()
 
     def _send(self, command: str) -> None:
         if self._serial is None:  # pragma: no cover - guarded by open()
             raise DeviceError("tinySA: serial port not open")
         try:
-            import serial  # type: ignore
-        except ImportError:  # pragma: no cover - open() already imported it
-            serial = None
-        try:
-            self._serial.write(command.encode("ascii"))
-            self._serial.flush()
-        except Exception as exc:  # SerialTimeoutException et al.
-            if serial is not None and isinstance(exc, serial.SerialException):
+            self._write_flush(command)
+        except Exception as exc:
+            kind = self._classify_error(exc)
+            if kind == "stall":
                 raise DeviceError(
                     f"tinySA: serial write stalled/failed ({exc}); "
                     "the device stopped accepting data."
                 ) from exc
-            raise
+            if kind == "disconnect" and not self._reconnecting:
+                # Device fell off USB (often our own RF): reopen and retry once.
+                self._reconnect()
+                try:
+                    self._write_flush(command)
+                except Exception as exc2:
+                    raise DeviceError(
+                        f"tinySA: write failed after reconnect ({exc2})"
+                    ) from exc2
+            else:
+                raise
         self._drain()
 
     def _drain(self) -> None:
@@ -215,40 +352,56 @@ class TinySAUltra(RFDevice):
         if ser is None:  # pragma: no cover - guarded by callers
             return
         reset = getattr(ser, "reset_input_buffer", None)
-        if seconds <= 0:
+        try:
+            if seconds <= 0:
+                if reset is not None:
+                    reset()
+                return
+            end = time.monotonic() + seconds
+            while True:
+                left = end - time.monotonic()
+                if left <= 0:
+                    break
+                waiting = getattr(ser, "in_waiting", 0)
+                if waiting:
+                    ser.read(waiting)
+                else:
+                    time.sleep(min(left, 0.02))
             if reset is not None:
                 reset()
-            return
-        end = time.monotonic() + seconds
-        while True:
-            left = end - time.monotonic()
-            if left <= 0:
-                break
-            waiting = getattr(ser, "in_waiting", 0)
-            if waiting:
-                ser.read(waiting)
-            else:
-                time.sleep(min(left, 0.02))
-        if reset is not None:
-            reset()
+        except Exception as exc:
+            # A drop while draining is recoverable -- reopen and let the next
+            # hop continue on the fresh port.
+            self._recover_or_raise(exc)
 
     def keep_alive(self) -> None:
         """Drain any streamed bytes while the engine is paused.
 
         During a periodic pause the engine stops emitting but the device's last
         ``sweep`` may keep streaming; without reading, the buffer fills over the
-        pause and the next write stalls. Discard whatever is waiting.
+        pause and the next write stalls. Discard whatever is waiting. A drop
+        during the pause is recovered so the run resumes cleanly.
         """
         ser = self._serial
         if ser is None:
             return
-        waiting = getattr(ser, "in_waiting", 0)
-        if waiting:
-            ser.read(waiting)
+        try:
+            waiting = getattr(ser, "in_waiting", 0)
+            if waiting:
+                ser.read(waiting)
+            else:
+                reset = getattr(ser, "reset_input_buffer", None)
+                if reset is not None:
+                    reset()
+        except Exception as exc:
+            self._recover_or_raise(exc)
+
+    def _recover_or_raise(self, exc: Exception) -> None:
+        """Reconnect on a disconnect error; re-raise anything else."""
+        if self._classify_error(exc) == "disconnect" and not self._reconnecting:
+            self._reconnect()
         else:
-            reset = getattr(ser, "reset_input_buffer", None)
-            if reset is not None:
-                reset()
+            raise exc
 
     def emit(self, emission) -> None:
         """Realise a native sweep or fixed-tone modulation; else plain broadcast.

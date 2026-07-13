@@ -244,3 +244,74 @@ def test_tinysa_broadcast_stays_bounded_across_many_hops():
         fake.feed(300)               # each sweep leaves a burst behind
         dev.broadcast(400_000_000, 1_000_000_000, 0.0)
     assert fake.buffered == 0        # never accumulates hop after hop
+
+
+class _EIOOnWriteSerial(_StreamingSerial):
+    """Fake serial that raises EIO on write once, mimicking a USB drop."""
+
+    def __init__(self, fail_times=1):
+        super().__init__()
+        self.fail_times = fail_times
+
+    def write(self, data):
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise OSError(5, "Input/output error")
+        return super().write(data)
+
+
+def test_tinysa_reconnects_on_io_error(monkeypatch):
+    # A mid-run USB drop (EIO) must be recovered: reopen the port and retry the
+    # write on the fresh handle instead of surfacing "(5, 'Input/output error')".
+    dev = TinySAUltra(port="/dev/ttyACM0", mode="sweep")
+    dev.reconnect_delay = 0
+    dev._serial = _EIOOnWriteSerial(fail_times=1)
+    fresh = _StreamingSerial()
+    monkeypatch.setattr(dev, "_open_serial", lambda port: fresh)
+    monkeypatch.setattr(dev, "_find_port", lambda: "/dev/ttyACM0")
+
+    dev._send("sweep 1 2 450\r")
+
+    assert dev._serial is fresh                                  # reconnected
+    assert any(b"sweep 1 2 450" in w for w in fresh.writes)      # command retried
+    assert any(b"output on" in w for w in fresh.writes)          # output re-armed
+
+
+def test_tinysa_reconnect_gives_up_when_device_stays_gone(monkeypatch):
+    from rfnoise.devices.base import DeviceError
+
+    dev = TinySAUltra(port="/dev/ttyACM0", mode="sweep")
+    dev.reconnect_delay = 0
+    dev.reconnect_attempts = 3
+    dev._serial = _EIOOnWriteSerial(fail_times=99)
+    monkeypatch.setattr(dev, "_find_port", lambda: None)  # never comes back
+    with pytest.raises(DeviceError, match="did not come back"):
+        dev._send("x\r")
+
+
+def test_tinysa_reconnect_disabled_fails_fast(monkeypatch):
+    from rfnoise.devices.base import DeviceError
+
+    dev = TinySAUltra(port="/dev/ttyACM0", mode="sweep", reconnect_attempts=0)
+    dev._serial = _EIOOnWriteSerial(fail_times=99)
+    with pytest.raises(DeviceError, match="reconnect disabled"):
+        dev._send("x\r")
+
+
+def test_tinysa_dwell_recovers_from_drop(monkeypatch):
+    dev = TinySAUltra(port="/dev/ttyACM0", mode="sweep")
+    dev.reconnect_delay = 0
+
+    class _EIOOnReadSerial(_StreamingSerial):
+        def read(self, n):
+            raise OSError(5, "Input/output error")
+
+    dropped = _EIOOnReadSerial()
+    dropped.feed(500)                     # data waiting -> triggers a read
+    dev._serial = dropped
+    fresh = _StreamingSerial()
+    monkeypatch.setattr(dev, "_open_serial", lambda port: fresh)
+    monkeypatch.setattr(dev, "_find_port", lambda: "/dev/ttyACM0")
+
+    dev._dwell(0.02)
+    assert dev._serial is fresh           # recovered mid-dwell
