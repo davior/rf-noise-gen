@@ -168,3 +168,79 @@ def test_tinysa_close_does_not_raise_when_port_stalled():
     dev.close()  # must not propagate the stalled output-off write
     assert fake.closed is True
     assert dev._serial is None
+
+
+class _StreamingSerial:
+    """Fake serial that models a running sweep streaming scan data.
+
+    ``feed`` queues bytes as if the firmware emitted them; ``in_waiting``/``read``
+    let the dwell drain them. Exists to prove the dwell no longer sleeps blind
+    (which let the buffer overflow after a couple of hops -> write stall).
+    """
+
+    def __init__(self):
+        self.buffered = 0
+        self.read_total = 0
+        self.reset_calls = 0
+        self.writes = []
+
+    def feed(self, n):
+        self.buffered += n
+
+    @property
+    def in_waiting(self):
+        return self.buffered
+
+    def read(self, n):
+        n = min(n, self.buffered)
+        self.buffered -= n
+        self.read_total += n
+        return b"x" * n
+
+    def write(self, data):
+        self.writes.append(data)
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def read_until(self, expected):
+        return b"ch> "
+
+    def reset_input_buffer(self):
+        self.buffered = 0
+        self.reset_calls += 1
+
+    def close(self):
+        self.closed = True
+
+
+def test_tinysa_dwell_drains_streamed_data():
+    # Regression: a running sweep streams data through the dwell. The dwell must
+    # read and discard it (not sleep blind) so the buffer can't overflow.
+    dev = TinySAUltra(port="/dev/null", mode="sweep")
+    fake = _StreamingSerial()
+    fake.feed(5000)
+    dev._serial = fake
+    dev._dwell(0.02)
+    assert fake.read_total >= 5000   # drained during the dwell
+    assert fake.buffered == 0        # nothing left to carry over / overflow
+
+
+def test_tinysa_zero_dwell_still_clears_buffer():
+    dev = TinySAUltra(port="/dev/null", mode="sweep")
+    fake = _StreamingSerial()
+    fake.feed(500)
+    dev._serial = fake
+    dev._dwell(0.0)
+    assert fake.buffered == 0 and fake.reset_calls >= 1
+
+
+def test_tinysa_broadcast_stays_bounded_across_many_hops():
+    dev = TinySAUltra(port="/dev/null", mode="sweep")
+    fake = _StreamingSerial()
+    dev._serial = fake
+    for _ in range(200):
+        fake.feed(300)               # each sweep leaves a burst behind
+        dev.broadcast(400_000_000, 1_000_000_000, 0.0)
+    assert fake.buffered == 0        # never accumulates hop after hop

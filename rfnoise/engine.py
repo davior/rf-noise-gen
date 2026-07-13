@@ -191,6 +191,9 @@ class NoiseGenerator:
             left = end - time.monotonic()
             if left <= 0:
                 break
+            # Keep the device serviced through the pause (e.g. drain a tinySA
+            # sweep that streams the whole time) so it can't overflow and stall.
+            self.device.keep_alive()
             time.sleep(min(left, 0.1))
 
     def plan(self, iterations: int) -> List[Band]:

@@ -192,6 +192,63 @@ class TinySAUltra(RFDevice):
         if self._serial is None:  # pragma: no cover - guarded by callers
             return
         self._serial.read_until(_PROMPT)
+        # Backstop: if a firmware revision's prompt/output doesn't match
+        # ``ch> `` exactly, ``read_until`` stops at the read timeout with bytes
+        # still queued. Clear them so nothing carries into the next write.
+        reset = getattr(self._serial, "reset_input_buffer", None)
+        if reset is not None:
+            reset()
+
+    def _dwell(self, seconds: float) -> None:
+        """Wait out the dwell while draining anything the device streams.
+
+        A running ``sweep`` streams scan data for the whole dwell. The old code
+        slept through it reading nothing, so the OS input buffer filled (fast
+        with a wide sweep -- a couple of hops), back-pressured the port, and the
+        next write stalled with a ``Write timeout``. Here we read and discard
+        pending bytes throughout the dwell (napping briefly when the port is
+        idle so we don't busy-spin), keeping the buffer empty regardless of how
+        much the firmware emits. With ``seconds <= 0`` we still clear anything
+        buffered so it can't carry into the next command.
+        """
+        ser = self._serial
+        if ser is None:  # pragma: no cover - guarded by callers
+            return
+        reset = getattr(ser, "reset_input_buffer", None)
+        if seconds <= 0:
+            if reset is not None:
+                reset()
+            return
+        end = time.monotonic() + seconds
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            waiting = getattr(ser, "in_waiting", 0)
+            if waiting:
+                ser.read(waiting)
+            else:
+                time.sleep(min(left, 0.02))
+        if reset is not None:
+            reset()
+
+    def keep_alive(self) -> None:
+        """Drain any streamed bytes while the engine is paused.
+
+        During a periodic pause the engine stops emitting but the device's last
+        ``sweep`` may keep streaming; without reading, the buffer fills over the
+        pause and the next write stalls. Discard whatever is waiting.
+        """
+        ser = self._serial
+        if ser is None:
+            return
+        waiting = getattr(ser, "in_waiting", 0)
+        if waiting:
+            ser.read(waiting)
+        else:
+            reset = getattr(ser, "reset_input_buffer", None)
+            if reset is not None:
+                reset()
 
     def emit(self, emission) -> None:
         """Realise a native sweep or fixed-tone modulation; else plain broadcast.
@@ -215,8 +272,7 @@ class TinySAUltra(RFDevice):
                 self._set_level(emission.power_dbm)
             self._send(_COMMANDS["sweep"].format(start=int(sweep.start_hz),
                                                  stop=int(sweep.stop_hz)))
-            if emission.dwell_s > 0:
-                time.sleep(emission.dwell_s)
+            self._dwell(emission.dwell_s)
             return
         super().emit(emission)
 
@@ -241,8 +297,7 @@ class TinySAUltra(RFDevice):
             deviation = (int(emission.deviation_hz) if emission.deviation_hz
                          else _DEFAULT_FM_DEVIATION_HZ)
             self._send(_COMMANDS["fm"].format(tone=tone, deviation=deviation))
-        if emission.dwell_s > 0:
-            time.sleep(emission.dwell_s)
+        self._dwell(emission.dwell_s)
 
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
                   power_dbm: Optional[float] = None) -> None:
@@ -253,5 +308,4 @@ class TinySAUltra(RFDevice):
             self._send(_COMMANDS["cw"].format(freq=center))
         else:
             self._send(_COMMANDS["sweep"].format(start=int(start_hz), stop=int(stop_hz)))
-        if dwell_s > 0:
-            time.sleep(dwell_s)
+        self._dwell(dwell_s)

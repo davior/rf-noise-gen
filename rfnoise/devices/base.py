@@ -246,6 +246,15 @@ class RFDevice(ABC):
     def _on_close(self) -> None:  # pragma: no cover - trivial default
         pass
 
+    def keep_alive(self) -> None:  # pragma: no cover - trivial default
+        """Service the device while the engine is paused (not emitting).
+
+        The engine calls this periodically during a periodic pause. The default
+        is a no-op; devices that keep streaming between hops (e.g. the tinySA's
+        running sweep) override it to drain their port so a long pause can't
+        overflow the input buffer and stall the next write.
+        """
+
     def emit(self, emission: "Emission") -> None:
         """Emit one :class:`Emission`; the engine's single per-hop entry point.
 
