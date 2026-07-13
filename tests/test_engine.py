@@ -128,6 +128,51 @@ def test_power_is_reproducible_with_seed():
     assert run_once() == run_once()
 
 
+def test_pause_disabled_by_default():
+    session = _mock_session()
+    assert not session.has_pause
+
+
+def test_pause_every_hops_still_completes_iterations():
+    # A small pause every 2 hops must not change how many hops run.
+    session = _mock_session(pause_seconds=0.01, pause_every_hops=2)
+    device = MockDevice(verbose=False, sleep=False)
+    gen = NoiseGenerator(device, session)
+    hops = gen.run(iterations=6)
+    assert hops == 6
+    assert len(device.history) == 6
+
+
+def test_pause_adds_wall_clock_time():
+    # 4 hops with a pause every 2 hops -> one pause fires (after hop 2; the
+    # pause after hop 4 is skipped as the final requested hop). ~0.1s minimum.
+    session = _mock_session(dwell_seconds=0.0, pause_seconds=0.1, pause_every_hops=2)
+    device = MockDevice(verbose=False, sleep=False)
+    gen = NoiseGenerator(device, session)
+    import time
+    t0 = time.monotonic()
+    gen.run(iterations=4)
+    assert time.monotonic() - t0 >= 0.09
+
+
+def test_pause_respects_duration_deadline():
+    # A long pause must not blow past the run's duration bound.
+    session = _mock_session(dwell_seconds=0.0, pause_seconds=10.0, pause_every_hops=1)
+    device = MockDevice(verbose=False, sleep=False)
+    gen = NoiseGenerator(device, session)
+    import time
+    t0 = time.monotonic()
+    gen.run(duration=0.2)
+    assert time.monotonic() - t0 < 1.0
+
+
+def test_negative_pause_rejected():
+    with pytest.raises(ValueError):
+        _mock_session(pause_seconds=-1.0, pause_every_hops=2)
+    with pytest.raises(ValueError):
+        _mock_session(pause_seconds=1.0, pause_every_hops=-2)
+
+
 def test_no_power_range_yields_none():
     gen = NoiseGenerator(_mock_device(), _mock_session())
     gen.run(iterations=5)

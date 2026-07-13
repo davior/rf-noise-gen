@@ -24,6 +24,8 @@
     "dwell_seconds": 0.25,
     "overlap": 0.0,
     "seed": 42,
+    "pause_seconds": 0.0,
+    "pause_every_hops": 0,
     "power_min_dbm": -60.0,
     "power_max_dbm": -30.0
   }

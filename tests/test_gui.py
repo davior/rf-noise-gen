@@ -31,6 +31,8 @@ def _sample_session():
         dwell_seconds=0.25,
         overlap=0.1,
         seed=7,
+        pause_seconds=1.5,
+        pause_every_hops=8,
         power_min_dbm=-40.0,
         power_max_dbm=-10.0,
     )
@@ -45,6 +47,8 @@ def test_session_form_round_trip():
     assert rebuilt.dwell_seconds == original.dwell_seconds
     assert rebuilt.overlap == original.overlap
     assert rebuilt.seed == original.seed
+    assert rebuilt.pause_seconds == original.pause_seconds
+    assert rebuilt.pause_every_hops == original.pause_every_hops
     assert rebuilt.power_min_dbm == original.power_min_dbm
     assert rebuilt.power_max_dbm == original.power_max_dbm
     assert len(rebuilt.ranges) == 2

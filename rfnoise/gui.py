@@ -91,6 +91,10 @@ SETTING_TIPS: Dict[str, str] = {
     "f_seed": "Seed for the random hop sequence. Leave blank for a fresh "
               "random pattern each run; set a value to reproduce the exact "
               "same sequence.",
+    "f_pause_seconds": "How long to pause transmission each time the hop count "
+                       "reaches the interval below, in seconds. 0 = no pause.",
+    "f_pause_every": "Pause after every this many hops (paired with 'pause "
+                     "(s)'). 0 disables the periodic pause.",
     "f_power_min": "Lower bound of the transmit strength range, in dBm. Leave "
                    "blank to let the device use its default power.",
     "f_power_max": "Upper bound of the transmit strength range, in dBm. Leave "
@@ -185,6 +189,8 @@ def collect_session(values: Dict[str, Any], rows: List[Dict[str, str]],
         dwell_seconds=float(values.get("dwell", 0.5) or 0.5),
         overlap=float(values.get("overlap", 0.0) or 0.0),
         seed=_parse_optional_int(values.get("seed", "")),
+        pause_seconds=float(values.get("pause_seconds", 0.0) or 0.0),
+        pause_every_hops=int(values.get("pause_every", 0) or 0),
         power_min_dbm=pmin,
         power_max_dbm=pmax,
     )
@@ -197,6 +203,8 @@ def session_to_form(session: Session) -> Tuple[Dict[str, Any], List[Dict[str, st
         "dwell": session.dwell_seconds,
         "overlap": session.overlap,
         "seed": "" if session.seed is None else str(session.seed),
+        "pause_seconds": session.pause_seconds,
+        "pause_every": session.pause_every_hops,
         "power_min": "" if session.power_min_dbm is None else f"{session.power_min_dbm:g}",
         "power_max": "" if session.power_max_dbm is None else f"{session.power_max_dbm:g}",
     }
@@ -548,6 +556,8 @@ def run_gui(session: Optional[Session] = None) -> None:
             "dwell": dpg.get_value("f_dwell"),
             "overlap": dpg.get_value("f_overlap"),
             "seed": dpg.get_value("f_seed"),
+            "pause_seconds": dpg.get_value("f_pause_seconds"),
+            "pause_every": dpg.get_value("f_pause_every"),
             "power_min": dpg.get_value("f_power_min"),
             "power_max": dpg.get_value("f_power_max"),
         }
@@ -626,6 +636,8 @@ def run_gui(session: Optional[Session] = None) -> None:
         dpg.set_value("f_dwell", float(values["dwell"]))
         dpg.set_value("f_overlap", float(values["overlap"]))
         dpg.set_value("f_seed", values["seed"])
+        dpg.set_value("f_pause_seconds", float(values["pause_seconds"]))
+        dpg.set_value("f_pause_every", int(values["pause_every"]))
         dpg.set_value("f_power_min", values["power_min"])
         dpg.set_value("f_power_max", values["power_max"])
         state["device"] = sess.device
@@ -787,6 +799,15 @@ def run_gui(session: Optional[Session] = None) -> None:
                                    default_value="" if session.seed is None else str(session.seed),
                                    width=160)
                 add_tip("f_seed", SETTING_TIPS["f_seed"])
+                with dpg.group(horizontal=True):
+                    dpg.add_input_float(label="pause (s)", tag="f_pause_seconds",
+                                        default_value=session.pause_seconds,
+                                        width=90, step=0)
+                    add_tip("f_pause_seconds", SETTING_TIPS["f_pause_seconds"])
+                    dpg.add_input_int(label="every (hops)", tag="f_pause_every",
+                                      default_value=session.pause_every_hops,
+                                      width=90, step=0)
+                    add_tip("f_pause_every", SETTING_TIPS["f_pause_every"])
                 with dpg.group(horizontal=True):
                     dpg.add_input_text(label="min dBm", tag="f_power_min",
                                        default_value=_initial_values["power_min"],

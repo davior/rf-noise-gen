@@ -102,6 +102,24 @@ class NoiseGenerator:
     def stop(self) -> None:
         self._stopped = True
 
+    def _pause(self, seconds: float, deadline: Optional[float]) -> None:
+        """Sleep for ``seconds``, staying responsive to stop and the deadline.
+
+        Sleeps in short slices so :meth:`stop`/Ctrl-C and a ``duration``
+        deadline still end the run promptly instead of blocking for the whole
+        pause. Clamps to the time left before ``deadline`` when one is set.
+        """
+        if seconds <= 0:
+            return
+        end = time.monotonic() + seconds
+        if deadline is not None:
+            end = min(end, deadline)
+        while not self._stopped:
+            left = end - time.monotonic()
+            if left <= 0:
+                break
+            time.sleep(min(left, 0.1))
+
     def plan(self, iterations: int) -> List[Band]:
         """Return the next ``iterations`` bands without transmitting (dry-run)."""
         return [self.selector.next() for _ in range(iterations)]
@@ -144,6 +162,13 @@ class NoiseGenerator:
                     ))
                 self.device.broadcast(band.start_hz, band.stop_hz, dwell, power)
                 self.hops += 1
+                # Periodic pause: hold transmission after every N hops. Skipped
+                # once iterations are exhausted (the loop-top check ends the run
+                # next, so we don't pause after the final requested hop).
+                if (self.session.has_pause
+                        and self.hops % self.session.pause_every_hops == 0
+                        and not (iterations is not None and self.hops >= iterations)):
+                    self._pause(self.session.pause_seconds, deadline)
         except KeyboardInterrupt:
             pass
         finally:
