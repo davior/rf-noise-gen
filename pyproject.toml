@@ -21,6 +21,7 @@ dependencies = []
 [project.optional-dependencies]
 hardware = ["pyserial>=3.5"]
 gui = ["dearpygui>=1.11"]
+dsp = ["numpy>=1.21"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]

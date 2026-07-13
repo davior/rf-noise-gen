@@ -8,7 +8,14 @@ import time
 from typing import Callable, List, Optional
 
 from .bands import Band, build_bands, build_coverage_bands
-from .devices.base import Emission, RFDevice, SweepSpec, Traversal
+from .devices.base import (
+    Emission,
+    Modulation,
+    ModSource,
+    RFDevice,
+    SweepSpec,
+    Traversal,
+)
 from .freq import format_freq
 from .model import Session
 from .status import HopStatus
@@ -92,6 +99,10 @@ class NoiseGenerator:
         else:
             self.selector = RandomPooledStrategy(self.bands, rng=self.rng)
         self.power_range = self._resolve_power_range()
+        # Resolve the requested modulation against the device once, warning and
+        # falling back where the hardware can't honour it (same pattern as the
+        # power range above). Result drives every Emission built in run().
+        self.modulation, self.mod_source = self._resolve_modulation()
         self._stopped = False
         self.hops = 0
 
@@ -116,6 +127,31 @@ class NoiseGenerator:
         if self.power_range is None:
             return None
         return self.rng.uniform(self.power_range[0], self.power_range[1])
+
+    def _resolve_modulation(self):
+        """Return the effective ``(modulation, source)`` for this device.
+
+        Mirrors :meth:`_resolve_power_range`: honour the session's request when
+        the device supports it, otherwise warn once and fall back (never fatal):
+
+        * modulation ∉ ``supported_modulations`` -> fall back to unmodulated CW.
+        * a noise source on a device that can't do arbitrary IQ
+          (``modulation_fidelity != "iq"``) -> fall back to a tone.
+        """
+        mod = self.session.modulation
+        if mod == Modulation.NONE:
+            return Modulation.NONE, None
+        caps = self.device.capabilities
+        if mod not in caps.supported_modulations:
+            print(f"warning: {self.device.name} cannot emit {mod.value.upper()} "
+                  f"modulation; falling back to unmodulated output.")
+            return Modulation.NONE, None
+        source = self.session.mod_source or ModSource.TONE
+        if source == ModSource.NOISE and caps.modulation_fidelity != "iq":
+            print(f"warning: {self.device.name} cannot modulate from a noise "
+                  f"source (fidelity {caps.modulation_fidelity!r}); using a tone.")
+            source = ModSource.TONE
+        return mod, source
 
     def _sweep_for(self, band: Band, dwell: float) -> Optional[SweepSpec]:
         """Build a :class:`SweepSpec` for ``band`` if it must be swept, else None.
@@ -203,6 +239,11 @@ class NoiseGenerator:
                     stop_hz=band.stop_hz,
                     dwell_s=dwell,
                     power_dbm=power,
+                    modulation=self.modulation,
+                    source=self.mod_source,
+                    depth=self.session.depth,
+                    deviation_hz=self.session.deviation_hz,
+                    tone_hz=self.session.tone_hz,
                     sweep=self._sweep_for(band, dwell),
                 ))
                 self.hops += 1

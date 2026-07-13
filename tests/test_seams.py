@@ -40,13 +40,22 @@ def test_emit_ignores_modulation_fields_today():
     assert (rec.start_hz, rec.stop_hz, rec.power_dbm) == (1_000_000, 1_010_000, None)
 
 
-def test_every_device_declares_todays_axes():
+def test_every_device_declares_its_axes():
+    # Every device can random-hop and always advertises plain (NONE) output.
+    # Phase 3 gives the mock an IQ modulation path; the hardware drivers stay
+    # NONE-only until their own wiring PR lands.
     for key in device_keys():
         caps = create_device(key).capabilities
         assert Traversal.RANDOM_HOP in caps.supported_traversals
-        assert caps.supported_modulations == frozenset({Modulation.NONE})
-        assert caps.instantaneous_bw_hz is None
-        assert caps.modulation_fidelity == "none"
+        assert Modulation.NONE in caps.supported_modulations
+        if key == "mock":
+            assert {Modulation.AM, Modulation.FM} <= caps.supported_modulations
+            assert caps.modulation_fidelity == "iq"
+            assert caps.instantaneous_bw_hz is not None
+        else:
+            assert caps.supported_modulations == frozenset({Modulation.NONE})
+            assert caps.instantaneous_bw_hz is None
+            assert caps.modulation_fidelity == "none"
 
 
 def test_random_band_selector_alias_still_importable():
