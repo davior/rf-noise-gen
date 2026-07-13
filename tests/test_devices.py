@@ -247,14 +247,21 @@ def test_tinysa_broadcast_stays_bounded_across_many_hops():
 
 
 class _EIOOnWriteSerial(_StreamingSerial):
-    """Fake serial that raises EIO on write once, mimicking a USB drop."""
+    """Fake serial that raises EIO on write, mimicking a USB drop.
 
-    def __init__(self, fail_times=1):
+    ``succeed_first`` writes go through before ``fail_times`` raises begin, so a
+    drop can be placed a few hops into a run rather than on the first write.
+    """
+
+    def __init__(self, fail_times=1, succeed_first=0):
         super().__init__()
         self.fail_times = fail_times
+        self.succeed_first = succeed_first
+        self._writes = 0
 
     def write(self, data):
-        if self.fail_times > 0:
+        self._writes += 1
+        if self._writes > self.succeed_first and self.fail_times > 0:
             self.fail_times -= 1
             raise OSError(5, "Input/output error")
         return super().write(data)
@@ -315,3 +322,34 @@ def test_tinysa_dwell_recovers_from_drop(monkeypatch):
 
     dev._dwell(0.02)
     assert dev._serial is fresh           # recovered mid-dwell
+
+
+def test_tinysa_run_continues_across_midrun_drop(monkeypatch):
+    # The key end-to-end guarantee: if the device drops while a run is in
+    # progress, the reconnect happens inside the device call so the engine's
+    # hop loop keeps going -- the run completes all iterations, no restart.
+    from rfnoise.engine import NoiseGenerator
+    from rfnoise.model import FrequencyRange, Session
+
+    dev = TinySAUltra(port="/dev/ttyACM0", mode="sweep")
+    dev.reconnect_delay = 0
+
+    made = []
+
+    def fake_open(port):
+        # The first handle (used for open + first hops) drops once a few writes
+        # in; handles opened by reconnect are healthy.
+        serial = (_EIOOnWriteSerial(fail_times=1, succeed_first=4)
+                  if not made else _StreamingSerial())
+        made.append(serial)
+        return serial
+
+    monkeypatch.setattr(dev, "_open_serial", fake_open)
+    monkeypatch.setattr(dev, "_find_port", lambda: "/dev/ttyACM0")
+
+    session = Session(device="tinysa", dwell_seconds=0.0, seed=1,
+                      ranges=[FrequencyRange(400_000_000, 1_000_000_000)])
+    hops = NoiseGenerator(dev, session).run(iterations=6)
+
+    assert hops == 6            # ran to completion despite the mid-run drop
+    assert len(made) >= 2       # a reconnect (second open) actually happened
