@@ -51,6 +51,17 @@ tinySA path needs no numpy. A device asked for a modulation it can't emit falls
 back to plain CW/noise with a warning. HackRF retunes per hop by restarting
 `hackrf_transfer` (a small gap); gapless streaming is future work.
 
+Modulation is set per session (the `rfnoise ui` editor and `rfnoise gui` both
+expose it) or overridden on the command line:
+
+```bash
+rfnoise run session.json --modulation fm --deviation 8000 --tone 1000
+rfnoise run session.json --modulation am --source noise --depth 0.5
+```
+
+`rfnoise list-devices` prints each device's supported modulations, fidelity, and
+instantaneous IQ bandwidth.
+
 Sources: [HackRF docs](https://hackrf.readthedocs.io/en/latest/hackrf_one.html),
 [tinySA](https://www.cnx-software.com/2025/12/15/tinysa-is-a-low-cost-handheld-spectrum-analyzer-with-built-in-signal-generator/),
 [RTL-SDR](https://www.rtl-sdr.com/about-rtl-sdr/).

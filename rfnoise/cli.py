@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from . import session as session_store
 from .devices import create_device, device_keys, get_device_class
-from .devices.base import Traversal
+from .devices.base import Modulation, ModSource, Traversal
 from .engine import ConfigurationError, NoiseGenerator
 from .freq import format_freq
 from .interactive import run_interactive
@@ -75,6 +75,16 @@ def _cmd_run(args) -> int:
         session.pause_seconds = args.pause_seconds
     if args.pause_every is not None:
         session.pause_every_hops = args.pause_every
+    if args.modulation:
+        session.modulation = Modulation(args.modulation)
+    if args.source:
+        session.mod_source = ModSource(args.source)
+    if args.depth is not None:
+        session.depth = args.depth
+    if args.deviation is not None:
+        session.deviation_hz = args.deviation
+    if args.tone is not None:
+        session.tone_hz = args.tone
     opts = dict(session.device_options)
     if session.device == "mock":
         opts.setdefault("sleep", not args.dry_run)
@@ -103,8 +113,13 @@ def _cmd_run(args) -> int:
     if session.has_pause:
         pause = (f", pause {session.pause_seconds:g}s every "
                  f"{session.pause_every_hops} hops")
+    modulation = ""
+    if session.has_modulation:
+        src = (session.mod_source or ModSource.TONE).value
+        modulation = f", {session.modulation.value.upper()} from {src}"
     print(f"running '{session.name}' on {device.name} [{session.traversal.value}]: "
-          f"{len(gen.bands)} bands, dwell {session.dwell_seconds}s{power}{pause}")
+          f"{len(gen.bands)} bands, dwell {session.dwell_seconds}s"
+          f"{modulation}{power}{pause}")
     reporter.start()
     import time as _time
     t0 = _time.monotonic()
@@ -148,6 +163,16 @@ def build_parser() -> argparse.ArgumentParser:
                        help="override session pause length (seconds)")
     p_run.add_argument("--pause-every", type=int,
                        help="override session pause interval (hops); 0 disables")
+    p_run.add_argument("--modulation", choices=["none", "am", "fm"],
+                       help="carrier modulation (needs numpy [dsp] for IQ devices)")
+    p_run.add_argument("--source", choices=["tone", "noise"],
+                       help="AM/FM modulating source (tone or broadband noise)")
+    p_run.add_argument("--depth", type=float,
+                       help="AM modulation depth, 0..1")
+    p_run.add_argument("--deviation", type=float,
+                       help="FM peak deviation, in Hz")
+    p_run.add_argument("--tone", type=float,
+                       help="modulating tone frequency, in Hz (source=tone)")
     p_run.add_argument("--dry-run", action="store_true",
                        help="print the hop schedule without transmitting")
     p_run.add_argument("--log", action="store_true",

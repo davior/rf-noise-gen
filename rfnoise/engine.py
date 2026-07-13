@@ -233,6 +233,7 @@ class NoiseGenerator:
                         dwell_s=dwell,
                         elapsed_s=time.monotonic() - start,
                         traversal=self.session.traversal.value,
+                        modulation=self.modulation.value,
                     ))
                 self.device.emit(Emission(
                     start_hz=band.start_hz,

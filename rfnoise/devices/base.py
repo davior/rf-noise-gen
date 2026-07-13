@@ -292,10 +292,20 @@ class RFDevice(ABC):
         else:
             power = "not adjustable"
         tx = "transmit" if caps.can_transmit else "RECEIVE ONLY"
+        mods = sorted(m.value for m in caps.supported_modulations if m != Modulation.NONE)
+        if mods:
+            ibw = ("" if caps.instantaneous_bw_hz is None
+                   else f", up to {format_freq(caps.instantaneous_bw_hz)} IQ")
+            modulation = f"{', '.join(mods).upper()} ({caps.modulation_fidelity}{ibw})"
+        else:
+            modulation = "none"
+        traversals = ", ".join(sorted(t.value for t in caps.supported_traversals))
         return (
             f"{caps.name} [{tx}]\n"
             f"  frequency range : {rng}\n"
             f"  max broadcast bw: {bw}\n"
             f"  output level    : {power}\n"
+            f"  modulation      : {modulation}\n"
+            f"  traversals      : {traversals}\n"
             f"  {caps.description}"
         )

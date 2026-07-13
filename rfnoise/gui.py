@@ -41,6 +41,7 @@ from .devices import (
     device_keys,
     get_device_class,
 )
+from .devices.base import ModSource
 from .engine import ConfigurationError, NoiseGenerator
 from .freq import format_freq, parse_freq
 from .model import FrequencyRange, Session
@@ -93,6 +94,20 @@ SETTING_TIPS: Dict[str, str] = {
                    "order from lowest to highest, then repeats; 'sweep_in_band' "
                    "covers each range's full width by stepping across it during "
                    "one dwell (uses the device's native sweep where available).",
+    "f_modulation": "What rides on the carrier. 'none' is plain CW/noise; 'am' "
+                    "and 'fm' impose amplitude/frequency modulation. IQ devices "
+                    "(HackRF, mock) need the [dsp] extra; the tinySA uses a fixed "
+                    "internal tone. A device that can't emit the choice falls back "
+                    "to plain output with a warning.",
+    "f_mod_source": "What drives AM/FM: a pure 'tone' or broadband 'noise'. "
+                    "Noise needs a full-IQ device; on the tinySA it falls back "
+                    "to a tone.",
+    "f_depth": "AM modulation depth, 0..1 (blank = device default). Only used "
+               "when modulation is 'am'.",
+    "f_deviation": "FM peak frequency deviation, in Hz (blank = default). Only "
+                   "used when modulation is 'fm'.",
+    "f_tone": "Modulating tone frequency in Hz (blank = default). Used when the "
+              "source is 'tone'.",
     "f_seed": "Seed for the random hop sequence. Leave blank for a fresh "
               "random pattern each run; set a value to reproduce the exact "
               "same sequence.",
@@ -186,6 +201,15 @@ def collect_session(values: Dict[str, Any], rows: List[Dict[str, str]],
     if pmin is not None and pmax is not None and pmax < pmin:
         pmin, pmax = pmax, pmin
 
+    modulation = values.get("modulation") or "none"
+    mod_source = None
+    depth = deviation = tone = None
+    if modulation != "none":
+        mod_source = values.get("mod_source") or "tone"
+        depth = _parse_optional_float(values.get("depth", ""))
+        deviation = _parse_optional_float(values.get("deviation", ""))
+        tone = _parse_optional_float(values.get("tone", ""))
+
     return Session(
         name=(values.get("name") or "untitled").strip() or "untitled",
         device=device,
@@ -194,6 +218,11 @@ def collect_session(values: Dict[str, Any], rows: List[Dict[str, str]],
         dwell_seconds=float(values.get("dwell", 0.5) or 0.5),
         overlap=float(values.get("overlap", 0.0) or 0.0),
         traversal=values.get("traversal") or "random_hop",
+        modulation=modulation,
+        mod_source=mod_source,
+        depth=depth,
+        deviation_hz=deviation,
+        tone_hz=tone,
         seed=_parse_optional_int(values.get("seed", "")),
         pause_seconds=float(values.get("pause_seconds", 0.0) or 0.0),
         pause_every_hops=int(values.get("pause_every", 0) or 0),
@@ -209,6 +238,11 @@ def session_to_form(session: Session) -> Tuple[Dict[str, Any], List[Dict[str, st
         "dwell": session.dwell_seconds,
         "overlap": session.overlap,
         "traversal": session.traversal.value,
+        "modulation": session.modulation.value,
+        "mod_source": (session.mod_source or ModSource.TONE).value,
+        "depth": "" if session.depth is None else f"{session.depth:g}",
+        "deviation": "" if session.deviation_hz is None else f"{session.deviation_hz:g}",
+        "tone": "" if session.tone_hz is None else f"{session.tone_hz:g}",
         "seed": "" if session.seed is None else str(session.seed),
         "pause_seconds": session.pause_seconds,
         "pause_every": session.pause_every_hops,
@@ -607,6 +641,11 @@ def run_gui(session: Optional[Session] = None) -> None:
             "dwell": dpg.get_value("f_dwell"),
             "overlap": dpg.get_value("f_overlap"),
             "traversal": dpg.get_value("f_traversal"),
+            "modulation": dpg.get_value("f_modulation"),
+            "mod_source": dpg.get_value("f_mod_source"),
+            "depth": dpg.get_value("f_depth"),
+            "deviation": dpg.get_value("f_deviation"),
+            "tone": dpg.get_value("f_tone"),
             "seed": dpg.get_value("f_seed"),
             "pause_seconds": dpg.get_value("f_pause_seconds"),
             "pause_every": dpg.get_value("f_pause_every"),
@@ -697,6 +736,11 @@ def run_gui(session: Optional[Session] = None) -> None:
         dpg.set_value("f_dwell", float(values["dwell"]))
         dpg.set_value("f_overlap", float(values["overlap"]))
         dpg.set_value("f_traversal", values["traversal"])
+        dpg.set_value("f_modulation", values["modulation"])
+        dpg.set_value("f_mod_source", values["mod_source"])
+        dpg.set_value("f_depth", values["depth"])
+        dpg.set_value("f_deviation", values["deviation"])
+        dpg.set_value("f_tone", values["tone"])
         dpg.set_value("f_seed", values["seed"])
         dpg.set_value("f_pause_seconds", float(values["pause_seconds"]))
         dpg.set_value("f_pause_every", int(values["pause_every"]))
@@ -886,6 +930,27 @@ def run_gui(session: Optional[Session] = None) -> None:
                               label="tuning mode", tag="f_traversal",
                               default_value=session.traversal.value, width=200)
                 add_tip("f_traversal", SETTING_TIPS["f_traversal"])
+                with dpg.group(horizontal=True):
+                    dpg.add_combo(["none", "am", "fm"], label="modulation",
+                                  tag="f_modulation",
+                                  default_value=session.modulation.value, width=90)
+                    add_tip("f_modulation", SETTING_TIPS["f_modulation"])
+                    dpg.add_combo(["tone", "noise"], label="source",
+                                  tag="f_mod_source",
+                                  default_value=_initial_values["mod_source"],
+                                  width=90)
+                    add_tip("f_mod_source", SETTING_TIPS["f_mod_source"])
+                with dpg.group(horizontal=True):
+                    dpg.add_input_text(label="AM depth", tag="f_depth",
+                                       default_value=_initial_values["depth"], width=70)
+                    add_tip("f_depth", SETTING_TIPS["f_depth"])
+                    dpg.add_input_text(label="FM dev (Hz)", tag="f_deviation",
+                                       default_value=_initial_values["deviation"],
+                                       width=80)
+                    add_tip("f_deviation", SETTING_TIPS["f_deviation"])
+                    dpg.add_input_text(label="tone (Hz)", tag="f_tone",
+                                       default_value=_initial_values["tone"], width=80)
+                    add_tip("f_tone", SETTING_TIPS["f_tone"])
                 dpg.add_input_text(label="seed (blank=random)", tag="f_seed",
                                    default_value="" if session.seed is None else str(session.seed),
                                    width=160)

@@ -38,6 +38,15 @@ def test_hopstatus_line_no_power():
     assert "--" in line
 
 
+def test_hopstatus_line_shows_modulation_only_when_active():
+    plain = _status().line()
+    assert "[am]" not in plain and "[fm]" not in plain
+    modded = HopStatus(index=1, start_hz=140_000_000, stop_hz=150_000_000,
+                       power_dbm=None, dwell_s=0.1, elapsed_s=1.0,
+                       modulation="fm").line()
+    assert "[fm]" in modded
+
+
 def test_log_reporter_writes_line_per_hop():
     buf = io.StringIO()
     rep = LogStatusReporter(buf)

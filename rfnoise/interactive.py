@@ -12,7 +12,7 @@ from typing import Optional
 
 from . import session as session_store
 from .devices import create_device, device_keys, get_device_class
-from .devices.base import Traversal
+from .devices.base import Modulation, ModSource, Traversal
 from .engine import ConfigurationError, NoiseGenerator, validate
 from .freq import format_freq, parse_freq
 from .model import FrequencyRange, Session
@@ -154,6 +154,35 @@ def _edit_traversal(session: Session) -> None:
     }.get(choice[:1], Traversal.RANDOM_HOP)
 
 
+def _edit_modulation(session: Session) -> None:
+    print("  modulation -- what rides on the carrier:")
+    print("    [n] none (plain CW/noise)   [a] AM   [f] FM")
+    print("    (AM/FM on the HackRF/mock needs the [dsp] extra; the tinySA uses a "
+          "fixed tone)")
+    current = {Modulation.AM: "a", Modulation.FM: "f"}.get(session.modulation, "n")
+    choice = _prompt("  modulation (n/a/f)", current).lower()[:1]
+    session.modulation = {"a": Modulation.AM, "f": Modulation.FM}.get(
+        choice, Modulation.NONE)
+    if session.modulation == Modulation.NONE:
+        session.mod_source = None
+        return
+    src = _prompt("  source -- tone or noise (t/n)",
+                  "n" if session.mod_source == ModSource.NOISE else "t").lower()[:1]
+    session.mod_source = ModSource.NOISE if src == "n" else ModSource.TONE
+    if session.mod_source == ModSource.TONE:
+        tone = _prompt("  modulating tone Hz (blank = default)",
+                       "" if session.tone_hz is None else str(session.tone_hz))
+        session.tone_hz = float(tone) if tone.strip() else None
+    if session.modulation == Modulation.AM:
+        depth = _prompt("  AM depth 0..1 (blank = default)",
+                        "" if session.depth is None else str(session.depth))
+        session.depth = float(depth) if depth.strip() else None
+    else:  # FM
+        dev = _prompt("  FM peak deviation Hz (blank = default)",
+                      "" if session.deviation_hz is None else str(session.deviation_hz))
+        session.deviation_hz = float(dev) if dev.strip() else None
+
+
 def _edit_pause(session: Session) -> None:
     print("  periodic pause -- 0 hops disables it")
     every = _prompt_float("  pause every N hops (0 = never)",
@@ -220,9 +249,13 @@ def _summary(session: Session) -> str:
     pause = ""
     if session.has_pause:
         pause = f"  pause={session.pause_seconds:g}s/{session.pause_every_hops}hops"
+    modulation = ""
+    if session.has_modulation:
+        src = (session.mod_source or ModSource.TONE).value
+        modulation = f"  mod={session.modulation.value}/{src}"
     return (
         f"name={session.name}  device={session.device}  "
-        f"mode={session.traversal.value}  "
+        f"mode={session.traversal.value}{modulation}  "
         f"ranges={len(session.ranges)}  dwell={session.dwell_seconds}s{pause}{power}"
     )
 
@@ -245,10 +278,13 @@ def run_interactive(session: Optional[Session] = None) -> None:
             _choose_device(session)
         elif choice == "4":
             session.dwell_seconds = _prompt_float("dwell seconds", session.dwell_seconds)
+            session.overlap = max(0.0, min(0.99, _prompt_float(
+                "band overlap 0..0.99 (0 = none)", session.overlap)))
             seed = _prompt("random seed (blank = none)",
                            "" if session.seed is None else str(session.seed))
             session.seed = int(seed) if seed.strip() else None
             _edit_traversal(session)
+            _edit_modulation(session)
             _edit_pause(session)
             _edit_power(session)
         elif choice == "5":

@@ -59,6 +59,36 @@ def test_session_form_round_trip():
     assert rebuilt.ranges[1].max_bandwidth_hz is None
 
 
+def test_modulation_form_round_trip():
+    from rfnoise.devices.base import Modulation, ModSource
+    from rfnoise.model import FrequencyRange, Session
+
+    original = Session(
+        name="mod", device="mock",
+        ranges=[FrequencyRange(100_000_000, 100_100_000)],
+        modulation=Modulation.FM, mod_source=ModSource.NOISE,
+        deviation_hz=8_000.0, tone_hz=1_500.0,
+    )
+    values, rows = gui.session_to_form(original)
+    rebuilt = gui.collect_session(values, rows, "mock", {})
+    assert rebuilt.modulation is Modulation.FM
+    assert rebuilt.mod_source is ModSource.NOISE
+    assert rebuilt.deviation_hz == 8_000.0
+    assert rebuilt.tone_hz == 1_500.0
+
+
+def test_collect_session_none_modulation_clears_params():
+    values = {"name": "x", "dwell": 0.5, "overlap": 0.0, "seed": "",
+              "power_min": "", "power_max": "", "modulation": "none",
+              "depth": "0.5", "deviation": "5000", "tone": "1000"}
+    sess = gui.collect_session(values, [], "mock", {})
+    from rfnoise.devices.base import Modulation
+
+    assert sess.modulation is Modulation.NONE
+    # Params are ignored when modulation is off.
+    assert sess.depth is None and sess.deviation_hz is None and sess.tone_hz is None
+
+
 def test_collect_session_blank_seed_and_power():
     values = {"name": "x", "dwell": 0.5, "overlap": 0.0,
               "seed": "", "power_min": "", "power_max": ""}
