@@ -160,10 +160,46 @@ class TinySAUltra(RFDevice):
         and the next write blocks forever. Reading up to the prompt after each
         command keeps the buffer empty; the serial read timeout bounds the wait
         if a firmware revision omits the prompt.
+
+        ``read_until`` only stops at the *first* ``ch>``; if a firmware revision
+        uses a different prompt, or streams extra bytes after it, the leftovers
+        would still accumulate hop after hop. ``reset_input_buffer`` afterwards
+        is a cheap backstop that discards anything pending so the buffer starts
+        each hop empty regardless of what the firmware actually printed.
         """
         if self._serial is None:  # pragma: no cover - guarded by callers
             return
         self._serial.read_until(_PROMPT)
+        self._serial.reset_input_buffer()
+
+    def _dwell(self, dwell_s: float) -> None:
+        """Hold the current output for ``dwell_s`` while draining the port.
+
+        ``time.sleep`` alone never reads the port. Some firmware streams scan
+        data while a ``sweep`` is running, so bytes emitted *during* the dwell
+        pile up in the OS input buffer; left unread they back-pressure the
+        device until the next write stalls -- the "serial write stalled" failure
+        that only surfaces after hundreds of hops. Reading and discarding
+        throughout the dwell keeps the buffer empty; a short nap avoids
+        busy-waiting when there is nothing to read.
+        """
+        if self._serial is None:  # pragma: no cover - guarded by callers
+            return
+        if dwell_s <= 0:
+            # No dwell to spend reading, but still clear anything pending so it
+            # cannot accumulate from one hop to the next.
+            self._serial.reset_input_buffer()
+            return
+        deadline = time.monotonic() + dwell_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            pending = self._serial.in_waiting
+            if pending:
+                self._serial.read(pending)
+            else:
+                time.sleep(min(remaining, 0.05))
 
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
                   power_dbm: Optional[float] = None) -> None:
@@ -174,5 +210,4 @@ class TinySAUltra(RFDevice):
             self._send(_COMMANDS["cw"].format(freq=center))
         else:
             self._send(_COMMANDS["sweep"].format(start=int(start_hz), stop=int(stop_hz)))
-        if dwell_s > 0:
-            time.sleep(dwell_s)
+        self._dwell(dwell_s)
