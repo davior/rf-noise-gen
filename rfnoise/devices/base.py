@@ -57,6 +57,34 @@ class Traversal(enum.Enum):
 
 
 @dataclass(frozen=True)
+class SweepSpec:
+    """A request to sweep across ``[start_hz, stop_hz]`` rather than sit on one band.
+
+    Set on an :class:`Emission` by the engine when a coverage band is wider than
+    the device can emit in a single burst. ``steps`` is how many discrete retune
+    slices a *stepped* realisation should use; ``duration_s`` is the total time
+    for the whole sweep (the hop's dwell). ``mode`` is ``"stepped"`` today;
+    ``"continuous"`` (phase-continuous IQ chirp) arrives with numpy in Phase 3.
+    """
+
+    start_hz: int
+    stop_hz: int
+    steps: int
+    duration_s: float
+    mode: str = "stepped"
+
+    @property
+    def width_hz(self) -> int:
+        return self.stop_hz - self.start_hz
+
+    def step_bands(self) -> "list[tuple[int, int]]":
+        """Divide ``[start, stop]`` into ``steps`` equal sub-bands, no gaps/overshoot."""
+        n = max(1, self.steps)
+        edges = [self.start_hz + round(i * self.width_hz / n) for i in range(n + 1)]
+        return [(edges[i], edges[i + 1]) for i in range(n)]
+
+
+@dataclass(frozen=True)
 class Emission:
     """One thing to emit: a band, for a dwell, with optional modulation.
 
@@ -64,8 +92,8 @@ class Emission:
     :meth:`RFDevice.emit`. Frequency is expressed as ``start_hz``/``stop_hz``
     (matching the existing :meth:`RFDevice.broadcast` contract), not a
     centre+bandwidth. Modulation fields are all ``None``/``NONE`` today; they
-    carry AM/FM parameters once Phase 3 lands. (Intra-band ``sweep`` params are
-    added in Phase 2.)
+    carry AM/FM parameters once Phase 3 lands. ``sweep`` is set when the band is
+    wider than one burst and should be swept across the dwell.
     """
 
     start_hz: int
@@ -77,6 +105,7 @@ class Emission:
     deviation_hz: Optional[float] = None   # FM peak deviation
     depth: Optional[float] = None          # AM depth, 0..1
     tone_hz: Optional[float] = None        # source=TONE frequency
+    sweep: Optional[SweepSpec] = None      # intra-band sweep (Phase 2)
 
 
 @dataclass(frozen=True)
@@ -221,11 +250,19 @@ class RFDevice(ABC):
         """Emit one :class:`Emission`; the engine's single per-hop entry point.
 
         The base implementation ignores the modulation fields and forwards the
-        band/dwell/power to :meth:`broadcast`, so today every device behaves
-        exactly as before (all emissions are ``Modulation.NONE``). Devices that
-        gain real modulation (Phase 3) override this to read the modulation
-        parameters; devices that only ever do CW/noise never need to.
+        band/dwell/power to :meth:`broadcast`. A stepped :class:`SweepSpec` is
+        realised universally by retuning across its sub-bands -- dividing the
+        dwell evenly and calling :meth:`broadcast` once per step, so every device
+        can sweep a wide band with no extra backend. Plain (non-swept) emissions
+        broadcast once, exactly as before. Devices with a native sweep (tinySA)
+        or real modulation (Phase 3) override this.
         """
+        sweep = emission.sweep
+        if sweep is not None and sweep.steps > 1:
+            step_dwell = emission.dwell_s / sweep.steps
+            for step_start, step_stop in sweep.step_bands():
+                self.broadcast(step_start, step_stop, step_dwell, emission.power_dbm)
+            return
         self.broadcast(emission.start_hz, emission.stop_hz,
                        emission.dwell_s, emission.power_dbm)
 

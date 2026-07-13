@@ -144,10 +144,14 @@ def _edit_device_options(session: Session) -> None:
 def _edit_traversal(session: Session) -> None:
     print("  tuning mode -- how the frequency moves between hops:")
     print("    [r] random-hop (default)   [s] sequential sweep (low to high)")
-    current = "s" if session.traversal == Traversal.SEQUENTIAL else "r"
-    choice = _prompt("  mode (r/s)", current).lower()
-    session.traversal = (Traversal.SEQUENTIAL if choice.startswith("s")
-                         else Traversal.RANDOM_HOP)
+    print("    [w] sweep-within-band (cover each range's width across one dwell)")
+    current = {Traversal.SEQUENTIAL: "s",
+               Traversal.SWEEP_IN_BAND: "w"}.get(session.traversal, "r")
+    choice = _prompt("  mode (r/s/w)", current).lower()
+    session.traversal = {
+        "s": Traversal.SEQUENTIAL,
+        "w": Traversal.SWEEP_IN_BAND,
+    }.get(choice[:1], Traversal.RANDOM_HOP)
 
 
 def _edit_pause(session: Session) -> None:

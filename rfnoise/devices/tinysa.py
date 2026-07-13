@@ -165,6 +165,25 @@ class TinySAUltra(RFDevice):
             return
         self._serial.read_until(_PROMPT)
 
+    def emit(self, emission) -> None:
+        """Realise an intra-band sweep with the tinySA's *native* sweep engine.
+
+        For a stepped :class:`~rfnoise.devices.base.SweepSpec` the tinySA does not
+        need Python to retune step-by-step: one ``sweep {start} {stop}`` command
+        sweeps the whole coverage span in firmware for the dwell. Plain emissions
+        fall back to :meth:`broadcast` via the base implementation.
+        """
+        sweep = emission.sweep
+        if sweep is not None and sweep.steps > 1:
+            if emission.power_dbm is not None:
+                self._set_level(emission.power_dbm)
+            self._send(_COMMANDS["sweep"].format(start=int(sweep.start_hz),
+                                                 stop=int(sweep.stop_hz)))
+            if emission.dwell_s > 0:
+                time.sleep(emission.dwell_s)
+            return
+        super().emit(emission)
+
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
                   power_dbm: Optional[float] = None) -> None:
         if power_dbm is not None:
