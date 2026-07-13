@@ -95,6 +95,7 @@ In a terminal it updates a single line in place; piped/non-TTY output (or
 pip install -e .            # core (pure stdlib, mock + engine + UI)
 pip install -e .[hardware]  # + pyserial for the tinySA driver
 pip install -e .[gui]       # + dearpygui for the graphical editor
+pip install -e .[dsp]       # + numpy for AM/FM/chirp modulation
 pip install -e .[dev]       # + pytest
 ```
 
@@ -264,7 +265,10 @@ rfnoise/
   devices/       device abstraction + drivers (base, mock, tinysa, hackrf, rtlsdr)
   freq.py        human-friendly frequency parse/format
   model.py       FrequencyRange, Session
-  bands.py       band splitting + random pooled selection
+  bands.py       band splitting + coverage bands
+  tuning.py      tuning strategies (random-hop, sequential, sweep-in-band)
+  modulation.py  AM/FM/chirp DSP core (numpy, optional [dsp] extra)
+  sources.py     modulating sources (tone/noise) for AM/FM
   engine.py      NoiseGenerator: validation + hop/dwell loop + power draws
   status.py      live/log run-status reporters (HopStatus)
   session.py     versioned JSON load/save

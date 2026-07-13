@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from .devices.base import Traversal
+from .devices.base import Modulation, ModSource, Traversal
 from .freq import format_freq
 
 
@@ -79,6 +79,15 @@ class Session:
     # How the centre frequency moves over time. ``RANDOM_HOP`` (default) picks a
     # random band each hop; ``SEQUENTIAL`` sweeps every band low-to-high in order.
     traversal: Traversal = Traversal.RANDOM_HOP
+    # Modulation axis (Phase 3): what rides on the carrier and what drives it.
+    # ``NONE`` (default) is today's plain CW/noise output and needs no numpy.
+    # ``mod_source`` only applies when modulation is AM/FM; ``depth`` (AM,
+    # 0..1) and ``deviation_hz`` (FM peak) fall back to DSP defaults when None.
+    modulation: Modulation = Modulation.NONE
+    mod_source: Optional[ModSource] = None
+    depth: Optional[float] = None
+    deviation_hz: Optional[float] = None
+    tone_hz: Optional[float] = None
     seed: Optional[int] = None
     # Optional periodic pause: hold transmission for ``pause_seconds`` after
     # every ``pause_every_hops`` hops. Both must be > 0 to take effect
@@ -95,6 +104,23 @@ class Session:
         # as a Traversal enum, so callers never have to import the enum.
         if isinstance(self.traversal, str):
             self.traversal = Traversal(self.traversal)
+        # Accept plain strings for the modulation axis too (session files / CLI).
+        if isinstance(self.modulation, str):
+            self.modulation = Modulation(self.modulation)
+        if isinstance(self.mod_source, str):
+            self.mod_source = ModSource(self.mod_source)
+        if self.depth is not None:
+            self.depth = float(self.depth)
+            if not 0.0 <= self.depth <= 1.0:
+                raise ValueError("depth must be between 0 and 1")
+        if self.deviation_hz is not None:
+            self.deviation_hz = float(self.deviation_hz)
+            if self.deviation_hz <= 0:
+                raise ValueError("deviation_hz must be positive")
+        if self.tone_hz is not None:
+            self.tone_hz = float(self.tone_hz)
+            if self.tone_hz <= 0:
+                raise ValueError("tone_hz must be positive")
         if self.power_min_dbm is not None and self.power_max_dbm is not None:
             if self.power_max_dbm < self.power_min_dbm:
                 raise ValueError("power_max_dbm must be >= power_min_dbm")
@@ -113,6 +139,10 @@ class Session:
     def has_pause(self) -> bool:
         return self.pause_every_hops > 0 and self.pause_seconds > 0
 
+    @property
+    def has_modulation(self) -> bool:
+        return self.modulation != Modulation.NONE
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
@@ -122,6 +152,11 @@ class Session:
             "dwell_seconds": self.dwell_seconds,
             "overlap": self.overlap,
             "traversal": self.traversal.value,
+            "modulation": self.modulation.value,
+            "mod_source": None if self.mod_source is None else self.mod_source.value,
+            "depth": self.depth,
+            "deviation_hz": self.deviation_hz,
+            "tone_hz": self.tone_hz,
             "seed": self.seed,
             "pause_seconds": self.pause_seconds,
             "pause_every_hops": self.pause_every_hops,
@@ -139,6 +174,11 @@ class Session:
             dwell_seconds=float(data.get("dwell_seconds", 0.5)),
             overlap=float(data.get("overlap", 0.0)),
             traversal=data.get("traversal", Traversal.RANDOM_HOP.value),
+            modulation=data.get("modulation", Modulation.NONE.value),
+            mod_source=data.get("mod_source"),
+            depth=data.get("depth"),
+            deviation_hz=data.get("deviation_hz"),
+            tone_hz=data.get("tone_hz"),
             seed=data.get("seed"),
             pause_seconds=float(data.get("pause_seconds", 0.0)),
             pause_every_hops=int(data.get("pause_every_hops", 0)),
