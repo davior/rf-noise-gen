@@ -25,7 +25,13 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from .base import DeviceCapabilities, DeviceError, RFDevice, TxBand
+from .base import (
+    DeviceCapabilities,
+    DeviceError,
+    Modulation,
+    RFDevice,
+    TxBand,
+)
 
 # Serial commands, centralised so they are easy to correct per firmware.
 # ``{freq}`` is an integer in Hz; ``{start}``/``{stop}`` likewise; ``{dbm}`` is
@@ -36,7 +42,22 @@ _COMMANDS = {
     "level": "level {dbm}\r",                    # output level in dBm
     "output_on": "output on\r",
     "output_off": "output off\r",
+    # -- fixed-tone modulation (FIRMWARE-SPECIFIC; verify before trusting RF) --
+    # The tinySA Ultra can impose a crude AM/FM on the parked CW carrier using
+    # its own internal tone -- it has no arbitrary IQ path, so only a tone
+    # source is possible. ``{tone}`` is the modulating tone in Hz, ``{depth}``
+    # the AM depth in percent (0-100), ``{deviation}`` the FM peak deviation in
+    # Hz. Command spellings vary by firmware; adjust against its ``help``.
+    "am": "am {tone} {depth}\r",
+    "fm": "fm {tone} {deviation}\r",
+    "mod_off": "modulation off\r",
 }
+
+# Internal modulating-tone defaults when a session leaves them unset. Kept local
+# so the pure-serial tinySA path never imports the numpy DSP core.
+_DEFAULT_TONE_HZ = 1_000
+_DEFAULT_AM_DEPTH_PCT = 50
+_DEFAULT_FM_DEVIATION_HZ = 5_000
 
 # Output level range of the tinySA Ultra signal generator.
 POWER_MIN_DBM = -110.0
@@ -99,6 +120,13 @@ class TinySAUltra(RFDevice):
             description=f"CW signal generator, {mode} burst mode.",
             power_min_dbm=POWER_MIN_DBM,
             power_max_dbm=POWER_MAX_DBM,
+            # Crude built-in AM/FM from a fixed internal tone (fidelity
+            # "fixed_tone"): no arbitrary IQ, so a noise source can't be honoured
+            # -- the engine falls back to a tone. No instantaneous IQ bandwidth.
+            supported_modulations=frozenset(
+                {Modulation.NONE, Modulation.AM, Modulation.FM}
+            ),
+            modulation_fidelity="fixed_tone",
         )
         self._serial = None
 
@@ -166,13 +194,21 @@ class TinySAUltra(RFDevice):
         self._serial.read_until(_PROMPT)
 
     def emit(self, emission) -> None:
-        """Realise an intra-band sweep with the tinySA's *native* sweep engine.
+        """Realise a native sweep or fixed-tone modulation; else plain broadcast.
 
-        For a stepped :class:`~rfnoise.devices.base.SweepSpec` the tinySA does not
-        need Python to retune step-by-step: one ``sweep {start} {stop}`` command
-        sweeps the whole coverage span in firmware for the dwell. Plain emissions
-        fall back to :meth:`broadcast` via the base implementation.
+        Three cases, in order:
+
+        * **AM/FM** -- park a CW carrier at the band centre and enable the
+          device's built-in fixed-tone modulator (:meth:`_modulate`). The tinySA
+          has no arbitrary IQ path; the engine has already forced a noise source
+          to a tone before we get here.
+        * **stepped sweep** -- one native ``sweep {start} {stop}`` command sweeps
+          the whole coverage span in firmware for the dwell.
+        * **plain** -- fall back to :meth:`broadcast` via the base implementation.
         """
+        if emission.modulation != Modulation.NONE:
+            self._modulate(emission)
+            return
         sweep = emission.sweep
         if sweep is not None and sweep.steps > 1:
             if emission.power_dbm is not None:
@@ -183,6 +219,30 @@ class TinySAUltra(RFDevice):
                 time.sleep(emission.dwell_s)
             return
         super().emit(emission)
+
+    def _modulate(self, emission) -> None:
+        """Park a carrier at the band centre and enable fixed-tone AM/FM.
+
+        Uses the device's internal modulating tone (``tone_hz`` or a default);
+        ``depth`` (AM) and ``deviation_hz`` (FM) fall back to sensible defaults
+        when the session leaves them unset. Serial strings are the (unverified)
+        entries in :data:`_COMMANDS`.
+        """
+        center = (int(emission.start_hz) + int(emission.stop_hz)) // 2
+        if emission.power_dbm is not None:
+            self._set_level(emission.power_dbm)
+        self._send(_COMMANDS["cw"].format(freq=center))
+        tone = int(emission.tone_hz) if emission.tone_hz else _DEFAULT_TONE_HZ
+        if emission.modulation == Modulation.AM:
+            depth_pct = (int(round(emission.depth * 100)) if emission.depth is not None
+                         else _DEFAULT_AM_DEPTH_PCT)
+            self._send(_COMMANDS["am"].format(tone=tone, depth=depth_pct))
+        else:  # FM
+            deviation = (int(emission.deviation_hz) if emission.deviation_hz
+                         else _DEFAULT_FM_DEVIATION_HZ)
+            self._send(_COMMANDS["fm"].format(tone=tone, deviation=deviation))
+        if emission.dwell_s > 0:
+            time.sleep(emission.dwell_s)
 
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
                   power_dbm: Optional[float] = None) -> None:

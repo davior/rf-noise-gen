@@ -32,16 +32,24 @@ several RF devices through a common abstraction layer.
 The "maximum bandwidth per broadcast" is the widest continuous signal a device
 can emit in one burst. These are built in, so you never have to look them up:
 
-| Device        | Transmit | Frequency range         | Auto max broadcast bandwidth | Output level |
-|---------------|----------|-------------------------|------------------------------|--------------|
-| HackRF One    | yes      | 1 MHz – 6 GHz           | **20 MHz** (20 Msps limit)   | -50…5 dBm (mapped to 0–47 dB gain, approx.) |
-| tinySA Ultra  | yes      | 100 kHz – 5.4 GHz       | CW generator → no fixed cap; uses a default band width (1 MHz sweep / 100 kHz cw) | -110…-20 dBm (calibrated) |
-| RTL-SDR       | **no**   | ~500 kHz – 1.766 GHz    | receive-only (cannot broadcast) | n/a |
-| mock          | yes      | 0 – 6 GHz               | 20 MHz (configurable)        | -120…10 dBm (recorded only) |
+| Device        | Transmit | Frequency range         | Auto max broadcast bandwidth | Output level | Modulation |
+|---------------|----------|-------------------------|------------------------------|--------------|------------|
+| HackRF One    | yes      | 1 MHz – 6 GHz           | **20 MHz** (20 Msps limit)   | -50…5 dBm (mapped to 0–47 dB gain, approx.) | AM/FM via arbitrary IQ (`iq`, needs `[dsp]`) |
+| tinySA Ultra  | yes      | 100 kHz – 5.4 GHz       | CW generator → no fixed cap; uses a default band width (1 MHz sweep / 100 kHz cw) | -110…-20 dBm (calibrated) | AM/FM from a fixed internal tone (`fixed_tone`) |
+| RTL-SDR       | **no**   | ~500 kHz – 1.766 GHz    | receive-only (cannot broadcast) | n/a | none (receive-only) |
+| mock          | yes      | 0 – 6 GHz               | 20 MHz (configurable)        | -120…10 dBm (recorded only) | AM/FM via arbitrary IQ (`iq`, needs `[dsp]`) |
 
 The engine picks the effective band width as
 `min(range override if set, device hardware cap if any, else device default)`,
 never wider than the range itself. Run `rfnoise list-devices` to print these.
+
+**Modulation (AM/FM).** IQ devices (HackRF, mock) synthesise the waveform
+themselves from a tone or noise source, so they need the `[dsp]` extra (numpy).
+The tinySA has no IQ path: it applies a crude AM/FM from its own fixed internal
+tone, so a *noise* source request falls back to a tone (with a warning) and the
+tinySA path needs no numpy. A device asked for a modulation it can't emit falls
+back to plain CW/noise with a warning. HackRF retunes per hop by restarting
+`hackrf_transfer` (a small gap); gapless streaming is future work.
 
 Sources: [HackRF docs](https://hackrf.readthedocs.io/en/latest/hackrf_one.html),
 [tinySA](https://www.cnx-software.com/2025/12/15/tinysa-is-a-low-cost-handheld-spectrum-analyzer-with-built-in-signal-generator/),
