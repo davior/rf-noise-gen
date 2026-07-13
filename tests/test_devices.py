@@ -216,35 +216,40 @@ class _StreamingSerial:
         self.closed = True
 
 
-def test_tinysa_dwell_drains_streamed_data():
-    # Regression: a running sweep streams data through the dwell. The dwell must
-    # read and discard it (not sleep blind) so the buffer can't overflow.
+def test_tinysa_dwell_does_no_serial_io_while_transmitting():
+    # In generator mode the device does not stream, and the carrier is radiating
+    # during the dwell -- so the dwell must NOT touch the serial port (that is
+    # exactly when an EMI-induced stall would hit). It just sleeps.
     dev = TinySAUltra(port="/dev/null", mode="sweep")
     fake = _StreamingSerial()
     fake.feed(5000)
     dev._serial = fake
-    dev._dwell(0.02)
-    assert fake.read_total >= 5000   # drained during the dwell
-    assert fake.buffered == 0        # nothing left to carry over / overflow
-
-
-def test_tinysa_zero_dwell_still_clears_buffer():
-    dev = TinySAUltra(port="/dev/null", mode="sweep")
-    fake = _StreamingSerial()
-    fake.feed(500)
-    dev._serial = fake
     dev._dwell(0.0)
-    assert fake.buffered == 0 and fake.reset_calls >= 1
+    assert fake.read_total == 0 and not fake.writes  # no reads, no writes
 
 
-def test_tinysa_broadcast_stays_bounded_across_many_hops():
-    dev = TinySAUltra(port="/dev/null", mode="sweep")
-    fake = _StreamingSerial()
-    dev._serial = fake
-    for _ in range(200):
-        fake.feed(300)               # each sweep leaves a burst behind
-        dev.broadcast(400_000_000, 1_000_000_000, 0.0)
-    assert fake.buffered == 0        # never accumulates hop after hop
+def test_tinysa_broadcast_gates_tx_off_during_config():
+    # Each hop must turn output OFF before sending config, then ON for the dwell,
+    # so config writes never go out while the radio is transmitting.
+    dev = TinySAUltra(port="/dev/null", mode="cw")
+    dev._serial = _StreamingSerial()
+    dev._tx_on = True                # pretend a previous hop left TX on
+    dev.broadcast(450_000_000, 450_000_000, 0.0)
+    writes = [w.decode() for w in dev._serial.writes]
+    off_idx = next(i for i, w in enumerate(writes) if "output off" in w)
+    on_idx = next(i for i, w in enumerate(writes) if "output on" in w)
+    cw_idx = next(i for i, w in enumerate(writes) if w.startswith("sweep "))
+    assert off_idx < cw_idx < on_idx  # off -> configure -> on
+    assert dev._tx_on is True
+
+
+def test_tinysa_keep_alive_goes_quiet_during_pause():
+    dev = TinySAUltra(port="/dev/null", mode="cw")
+    dev._serial = _StreamingSerial()
+    dev._tx_on = True
+    dev.keep_alive()
+    assert any(b"output off" in w for w in dev._serial.writes)
+    assert dev._tx_on is False
 
 
 class _EIOOnWriteSerial(_StreamingSerial):
@@ -306,23 +311,50 @@ def test_tinysa_reconnect_disabled_fails_fast(monkeypatch):
         dev._send("x\r")
 
 
-def test_tinysa_dwell_recovers_from_drop(monkeypatch):
+def test_tinysa_keep_alive_recovers_from_drop(monkeypatch):
+    # Going quiet during a pause writes `output off`; a drop there is recovered.
     dev = TinySAUltra(port="/dev/ttyACM0", mode="sweep")
     dev.reconnect_delay = 0
-
-    class _EIOOnReadSerial(_StreamingSerial):
-        def read(self, n):
-            raise OSError(5, "Input/output error")
-
-    dropped = _EIOOnReadSerial()
-    dropped.feed(500)                     # data waiting -> triggers a read
-    dev._serial = dropped
+    dev._serial = _EIOOnWriteSerial(fail_times=1)
+    dev._tx_on = True                     # so keep_alive tries to write output off
     fresh = _StreamingSerial()
     monkeypatch.setattr(dev, "_open_serial", lambda port: fresh)
     monkeypatch.setattr(dev, "_find_port", lambda: "/dev/ttyACM0")
 
-    dev._dwell(0.02)
-    assert dev._serial is fresh           # recovered mid-dwell
+    dev.keep_alive()
+    assert dev._serial is fresh           # recovered during the pause
+
+
+def test_tinysa_write_timeout_is_retried_then_fatal(monkeypatch):
+    # A transient write timeout (EMI wedge) is retried; a persistent one is fatal.
+    import serial as _serial
+    from rfnoise.devices.base import DeviceError
+
+    dev = TinySAUltra(port="/dev/ttyACM0", mode="sweep")
+    dev._write_retry_delay = 0
+
+    class _StallOnce(_StreamingSerial):
+        def __init__(self):
+            super().__init__()
+            self.attempts = 0
+
+        def write(self, data):
+            self.attempts += 1
+            if self.attempts == 1:
+                raise _serial.SerialTimeoutException("Write timeout")
+            return super().write(data)
+
+    dev._serial = _StallOnce()
+    dev._send("mode output\r")            # first write stalls, retry succeeds
+    assert dev._serial.attempts == 2
+
+    class _StallAlways(_StreamingSerial):
+        def write(self, data):
+            raise _serial.SerialTimeoutException("Write timeout")
+
+    dev._serial = _StallAlways()
+    with pytest.raises(DeviceError, match="stopped accepting data"):
+        dev._send("mode output\r")
 
 
 def test_tinysa_run_continues_across_midrun_drop(monkeypatch):

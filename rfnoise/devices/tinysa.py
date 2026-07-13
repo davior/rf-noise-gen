@@ -161,7 +161,15 @@ class TinySAUltra(RFDevice):
         self._mod_on = False
         self._last_level: Optional[int] = None
         self._last_sweeptime: Optional[float] = None
-        self._output_armed = False
+        # Whether RF output is currently enabled. We keep TX OFF while sending
+        # config commands, because the device's own radiated RF can couple into
+        # its USB and wedge the serial link (write timeout) -- so all commands go
+        # out with output off, then output is enabled just for the dwell.
+        self._tx_on = False
+        # A stray write timeout (transient EMI wedge) is retried this many times
+        # after a short pause before it is treated as fatal.
+        self._write_retries = 2
+        self._write_retry_delay = 0.25
         if default_band_width is None:
             default_band_width = 1_000_000 if mode == "sweep" else 100_000
         self.capabilities = DeviceCapabilities(
@@ -210,13 +218,14 @@ class TinySAUltra(RFDevice):
         output path and ``output on`` are (re)issued by :meth:`broadcast` /
         :meth:`_modulate`, so the stage state is reset here to force a resend.
         """
+        self._send(_COMMANDS["output_off"])
+        self._tx_on = False
         self._send(_COMMANDS["mode_output"])
         self._send(_COMMANDS["mod_off"])
         self._mod_on = False
         self._stage = None
         self._last_level = None
         self._last_sweeptime = None
-        self._output_armed = False
         self._set_level(self.level)
 
     def _stage_for(self, hz: int) -> str:
@@ -246,11 +255,23 @@ class TinySAUltra(RFDevice):
             self._send(_COMMANDS["sweeptime"].format(seconds=seconds))
             self._last_sweeptime = seconds
 
-    def _ensure_output_on(self) -> None:
-        """Enable RF output once; it stays on across hops."""
-        if not self._output_armed:
+    def _enable_output(self) -> None:
+        """Turn RF output on (for the dwell) if not already transmitting."""
+        if not self._tx_on:
             self._send(_COMMANDS["output_on"])
-            self._output_armed = True
+            self._tx_on = True
+
+    def _disable_output(self) -> None:
+        """Turn RF output off so config commands go out with the radio quiet.
+
+        Transmitting while writing to the serial port risks an EMI-induced write
+        stall (the radiated carrier couples into the USB). Keeping TX off during
+        the command exchange avoids that; it also gives a genuinely quiet window
+        during a periodic pause.
+        """
+        if self._tx_on:
+            self._send(_COMMANDS["output_off"])
+            self._tx_on = False
 
     def _clear_modulation(self) -> None:
         if self._mod_on:
@@ -373,29 +394,42 @@ class TinySAUltra(RFDevice):
         self._serial.write(command.encode("ascii"))
         self._serial.flush()
 
+    def _safe_reset_input(self) -> None:
+        ser = self._serial
+        reset = getattr(ser, "reset_input_buffer", None) if ser is not None else None
+        if reset is not None:
+            try:
+                reset()
+            except Exception:  # pragma: no cover - best effort
+                pass
+
     def _send(self, command: str) -> None:
         if self._serial is None:  # pragma: no cover - guarded by open()
             raise DeviceError("tinySA: serial port not open")
         t0 = time.monotonic()
-        try:
-            self._write_flush(command)
-        except Exception as exc:
-            kind = self._classify_error(exc)
-            if kind == "stall":
-                raise DeviceError(
-                    f"tinySA: serial write stalled/failed ({exc}); "
-                    "the device stopped accepting data."
-                ) from exc
-            if kind == "disconnect" and not self._reconnecting:
-                # Device fell off USB (often our own RF): reopen and retry once.
-                self._reconnect()
-                try:
-                    self._write_flush(command)
-                except Exception as exc2:
+        for attempt in range(self._write_retries + 1):
+            try:
+                self._write_flush(command)
+                break
+            except Exception as exc:
+                kind = self._classify_error(exc)
+                if kind == "disconnect" and not self._reconnecting:
+                    # Device fell off USB (often our own RF): reopen and retry.
+                    self._reconnect()
+                    continue
+                if kind == "stall" and attempt < self._write_retries \
+                        and not self._reconnecting:
+                    # Transient EMI wedge: pause, clear the port, and retry.
+                    time.sleep(self._write_retry_delay)
+                    self._safe_reset_input()
+                    continue
+                if kind == "stall":
                     raise DeviceError(
-                        f"tinySA: write failed after reconnect ({exc2})"
-                    ) from exc2
-            else:
+                        f"tinySA: serial write stalled/failed ({exc}); "
+                        "the device stopped accepting data. If it recurs while "
+                        "transmitting, it is RF coupling into the USB -- improve "
+                        "shielding / use a powered hub."
+                    ) from exc
                 raise
         response = self._drain()
         if self.debug:
@@ -428,62 +462,29 @@ class TinySAUltra(RFDevice):
         return data
 
     def _dwell(self, seconds: float) -> None:
-        """Wait out the dwell while draining anything the device streams.
+        """Hold for the dwell while transmitting -- with **no** serial I/O.
 
-        A running ``sweep`` streams scan data for the whole dwell. The old code
-        slept through it reading nothing, so the OS input buffer filled (fast
-        with a wide sweep -- a couple of hops), back-pressured the port, and the
-        next write stalled with a ``Write timeout``. Here we read and discard
-        pending bytes throughout the dwell (napping briefly when the port is
-        idle so we don't busy-spin), keeping the buffer empty regardless of how
-        much the firmware emits. With ``seconds <= 0`` we still clear anything
-        buffered so it can't carry into the next command.
+        In generator (``mode output``) mode the device does not stream, so there
+        is nothing to drain; and because the carrier is radiating during the
+        dwell, touching the serial port here is exactly when an EMI-induced
+        write/read stall is most likely. So we simply sleep (the port stays
+        idle), then the next hop turns output off before it writes anything.
         """
-        ser = self._serial
-        if ser is None:  # pragma: no cover - guarded by callers
-            return
-        reset = getattr(ser, "reset_input_buffer", None)
-        try:
-            if seconds <= 0:
-                if reset is not None:
-                    reset()
-                return
-            end = time.monotonic() + seconds
-            while True:
-                left = end - time.monotonic()
-                if left <= 0:
-                    break
-                waiting = getattr(ser, "in_waiting", 0)
-                if waiting:
-                    ser.read(waiting)
-                else:
-                    time.sleep(min(left, 0.02))
-            if reset is not None:
-                reset()
-        except Exception as exc:
-            # A drop while draining is recoverable -- reopen and let the next
-            # hop continue on the fresh port.
-            self._recover_or_raise(exc)
+        if seconds > 0:
+            time.sleep(seconds)
 
     def keep_alive(self) -> None:
-        """Drain any streamed bytes while the engine is paused.
+        """Go quiet during a periodic pause: stop transmitting.
 
-        During a periodic pause the engine stops emitting but the device's last
-        ``sweep`` may keep streaming; without reading, the buffer fills over the
-        pause and the next write stalls. Discard whatever is waiting. A drop
-        during the pause is recovered so the run resumes cleanly.
+        The engine calls this while paused. Turning output off gives a genuinely
+        idle window (the point of a duty-cycle pause) and keeps the carrier from
+        coupling into the USB while we're not actively hopping. The next hop
+        re-enables output.
         """
-        ser = self._serial
-        if ser is None:
+        if self._serial is None:
             return
         try:
-            waiting = getattr(ser, "in_waiting", 0)
-            if waiting:
-                ser.read(waiting)
-            else:
-                reset = getattr(ser, "reset_input_buffer", None)
-                if reset is not None:
-                    reset()
+            self._disable_output()
         except Exception as exc:
             self._recover_or_raise(exc)
 
@@ -515,6 +516,7 @@ class TinySAUltra(RFDevice):
             # One native firmware sweep covers the whole span for the dwell --
             # no Python step retunes.
             center = (int(sweep.start_hz) + int(sweep.stop_hz)) // 2
+            self._disable_output()          # configure with the radio quiet
             self._ensure_stage(center)
             self._clear_modulation()
             if emission.power_dbm is not None:
@@ -522,7 +524,7 @@ class TinySAUltra(RFDevice):
             self._send(_COMMANDS["sweep"].format(start=int(sweep.start_hz),
                                                  stop=int(sweep.stop_hz)))
             self._set_sweeptime(emission.dwell_s)
-            self._ensure_output_on()
+            self._enable_output()           # transmit for the dwell
             self._dwell(emission.dwell_s)
             return
         super().emit(emission)
@@ -536,6 +538,7 @@ class TinySAUltra(RFDevice):
         firmware ``modulation`` command (see :data:`_COMMANDS`).
         """
         center = (int(emission.start_hz) + int(emission.stop_hz)) // 2
+        self._disable_output()              # configure with the radio quiet
         self._ensure_stage(center)
         if emission.power_dbm is not None:
             self._set_level(emission.power_dbm)
@@ -555,12 +558,13 @@ class TinySAUltra(RFDevice):
             self._send(_COMMANDS["mod_deviation"].format(hz=deviation))
             self._send(_COMMANDS["mod_fm"])
         self._mod_on = True
-        self._ensure_output_on()
+        self._enable_output()               # transmit for the dwell
         self._dwell(emission.dwell_s)
 
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
                   power_dbm: Optional[float] = None) -> None:
         center = (int(start_hz) + int(stop_hz)) // 2
+        self._disable_output()              # configure with the radio quiet
         self._ensure_stage(center)
         self._clear_modulation()
         if power_dbm is not None:
@@ -570,5 +574,5 @@ class TinySAUltra(RFDevice):
         else:
             self._send(_COMMANDS["sweep"].format(start=int(start_hz), stop=int(stop_hz)))
             self._set_sweeptime(dwell_s)
-        self._ensure_output_on()
+        self._enable_output()               # transmit for the dwell
         self._dwell(dwell_s)
