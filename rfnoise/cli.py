@@ -8,6 +8,7 @@ from typing import List, Optional
 
 from . import session as session_store
 from .devices import create_device, device_keys, get_device_class
+from .devices.base import Traversal
 from .engine import ConfigurationError, NoiseGenerator
 from .freq import format_freq
 from .interactive import run_interactive
@@ -68,6 +69,8 @@ def _cmd_run(args) -> int:
     session = session_store.load(args.session)
     if args.device:
         session.device = args.device
+    if args.traversal:
+        session.traversal = Traversal(args.traversal)
     if args.pause_seconds is not None:
         session.pause_seconds = args.pause_seconds
     if args.pause_every is not None:
@@ -100,7 +103,7 @@ def _cmd_run(args) -> int:
     if session.has_pause:
         pause = (f", pause {session.pause_seconds:g}s every "
                  f"{session.pause_every_hops} hops")
-    print(f"running '{session.name}' on {device.name}: "
+    print(f"running '{session.name}' on {device.name} [{session.traversal.value}]: "
           f"{len(gen.bands)} bands, dwell {session.dwell_seconds}s{power}{pause}")
     reporter.start()
     import time as _time
@@ -135,6 +138,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="run a saved session")
     p_run.add_argument("session", help="session JSON file")
     p_run.add_argument("--device", choices=device_keys(), help="override device")
+    p_run.add_argument("--traversal", choices=["random_hop", "sequential"],
+                       help="override tuning mode: random-hop or sequential sweep")
     p_run.add_argument("--duration", type=float, help="seconds to run")
     p_run.add_argument("--iterations", type=int, help="number of hops")
     p_run.add_argument("--pause-seconds", type=float,

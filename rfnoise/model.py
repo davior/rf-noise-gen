@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from .devices.base import Traversal
 from .freq import format_freq
 
 
@@ -75,6 +76,9 @@ class Session:
     ranges: List[FrequencyRange] = field(default_factory=list)
     dwell_seconds: float = 0.5
     overlap: float = 0.0  # 0 = sequential bands; 0<overlap<1 = fractional overlap
+    # How the centre frequency moves over time. ``RANDOM_HOP`` (default) picks a
+    # random band each hop; ``SEQUENTIAL`` sweeps every band low-to-high in order.
+    traversal: Traversal = Traversal.RANDOM_HOP
     seed: Optional[int] = None
     # Optional periodic pause: hold transmission for ``pause_seconds`` after
     # every ``pause_every_hops`` hops. Both must be > 0 to take effect
@@ -87,6 +91,10 @@ class Session:
     power_max_dbm: Optional[float] = None
 
     def __post_init__(self) -> None:
+        # Accept a plain string (e.g. from a session file or CLI flag) as well
+        # as a Traversal enum, so callers never have to import the enum.
+        if isinstance(self.traversal, str):
+            self.traversal = Traversal(self.traversal)
         if self.power_min_dbm is not None and self.power_max_dbm is not None:
             if self.power_max_dbm < self.power_min_dbm:
                 raise ValueError("power_max_dbm must be >= power_min_dbm")
@@ -113,6 +121,7 @@ class Session:
             "ranges": [r.to_dict() for r in self.ranges],
             "dwell_seconds": self.dwell_seconds,
             "overlap": self.overlap,
+            "traversal": self.traversal.value,
             "seed": self.seed,
             "pause_seconds": self.pause_seconds,
             "pause_every_hops": self.pause_every_hops,
@@ -129,6 +138,7 @@ class Session:
             ranges=[FrequencyRange.from_dict(r) for r in data.get("ranges", [])],
             dwell_seconds=float(data.get("dwell_seconds", 0.5)),
             overlap=float(data.get("overlap", 0.0)),
+            traversal=data.get("traversal", Traversal.RANDOM_HOP.value),
             seed=data.get("seed"),
             pause_seconds=float(data.get("pause_seconds", 0.0)),
             pause_every_hops=int(data.get("pause_every_hops", 0)),

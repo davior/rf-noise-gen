@@ -7,11 +7,11 @@ import time
 from typing import Callable, List, Optional
 
 from .bands import Band, build_bands
-from .devices.base import Emission, RFDevice
+from .devices.base import Emission, RFDevice, Traversal
 from .freq import format_freq
 from .model import Session
 from .status import HopStatus
-from .tuning import RandomPooledStrategy
+from .tuning import RandomPooledStrategy, SequentialSweepStrategy
 
 
 class ConfigurationError(Exception):
@@ -73,7 +73,12 @@ class NoiseGenerator:
         self.bands = validate(session, device)
         # One RNG shared by band selection and power draws -> reproducible.
         self.rng = random.Random(session.seed)
-        self.selector = RandomPooledStrategy(self.bands, rng=self.rng)
+        # Pick the tuning strategy from the session. SequentialSweepStrategy
+        # draws no randomness, so it never perturbs the shared power stream.
+        if session.traversal == Traversal.SEQUENTIAL:
+            self.selector = SequentialSweepStrategy(self.bands)
+        else:
+            self.selector = RandomPooledStrategy(self.bands, rng=self.rng)
         self.power_range = self._resolve_power_range()
         self._stopped = False
         self.hops = 0
@@ -160,6 +165,7 @@ class NoiseGenerator:
                         power_dbm=power,
                         dwell_s=dwell,
                         elapsed_s=time.monotonic() - start,
+                        traversal=self.session.traversal.value,
                     ))
                 self.device.emit(Emission(
                     start_hz=band.start_hz,
