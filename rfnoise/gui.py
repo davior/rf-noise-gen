@@ -407,6 +407,10 @@ DEFAULT_DBM_RANGE: Tuple[float, float] = (-100.0, 10.0)
 NO_POWER_DBM: float = 0.0  # y for hops with no strength info (no power range)
 HZ_PER_MHZ: float = 1_000_000.0  # X axis is displayed in MHz, not Hz
 
+# Target render-loop period (~60 fps). Pacing the loop keeps it from busy-spinning
+# and starving the engine's serial worker thread (see run_gui's main loop).
+_FRAME_INTERVAL_S: float = 1.0 / 60.0
+
 
 def frequency_extent(session: Session) -> Optional[Tuple[float, float]]:
     """(min lower, max upper) Hz across all ranges for the X axis, or None.
@@ -1096,8 +1100,18 @@ def run_gui(session: Optional[Session] = None) -> None:
 
     try:
         while dpg.is_dearpygui_running():
+            frame_start = time.monotonic()
             refresh_plot()
             dpg.render_dearpygui_frame()
+            # Pace the loop to ~60 fps. Without this the render loop is a busy
+            # spin that pins a core and holds the GIL, starving the engine's
+            # worker thread -- fatal for a device that does blocking serial reads
+            # (the tinySA), whose read_until then times out mid-response. The
+            # sleep releases the GIL so the worker gets regular CPU time.
+            elapsed = time.monotonic() - frame_start
+            # Floor the sleep so even a slow frame still yields the GIL to the
+            # worker (a busy frame must never fully starve the serial reads).
+            time.sleep(max(0.003, _FRAME_INTERVAL_S - elapsed))
     finally:
         # Never leave a worker transmitting after the window is gone.
         if controller.running:
