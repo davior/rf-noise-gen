@@ -35,7 +35,7 @@ can emit in one burst. These are built in, so you never have to look them up:
 | Device        | Transmit | Frequency range         | Auto max broadcast bandwidth | Output level | Modulation |
 |---------------|----------|-------------------------|------------------------------|--------------|------------|
 | HackRF One    | yes      | 1 MHz – 6 GHz           | **20 MHz** (20 Msps limit)   | -50…5 dBm (mapped to 0–47 dB gain, approx.) | AM/FM via arbitrary IQ (`iq`, needs `[dsp]`) |
-| tinySA Ultra  | yes      | 100 kHz – 5.4 GHz       | CW generator → no fixed cap; uses a default band width (1 MHz sweep / 100 kHz cw) | -110…-20 dBm (calibrated) | AM/FM from a fixed internal tone (`fixed_tone`) |
+| tinySA Ultra  | yes      | 100 kHz – 5.4 GHz       | CW generator → no fixed cap; uses a default band width (1 MHz sweep / 100 kHz hold) | -76…-6 dBm (calibrated) | AM/FM from a fixed internal tone (`fixed_tone`) |
 | RTL-SDR       | **no**   | ~500 kHz – 1.766 GHz    | receive-only (cannot broadcast) | n/a | none (receive-only) |
 | mock          | yes      | 0 – 6 GHz               | 20 MHz (configurable)        | -120…10 dBm (recorded only) | AM/FM via arbitrary IQ (`iq`, needs `[dsp]`) |
 
@@ -61,6 +61,13 @@ rfnoise run session.json --modulation am --source noise --depth 0.5
 
 `rfnoise list-devices` prints each device's supported modulations, fidelity, and
 instantaneous IQ bandwidth.
+
+**tinySA burst mode.** The tinySA `mode` device option chooses what the carrier
+does during each hop's dwell: `hold` parks a single CW tone at the band centre,
+`sweep` sweeps across the band once over the dwell, and `chirp` sweeps fast and
+repeatedly (a `chirp_time`-second sweep, rising-tone effect). The `output_stage`
+option (`auto`/`normal`/`mixer`) selects the RF output path — `auto` uses the
+fundamental path up to 800 MHz and the mixer path above.
 
 Sources: [HackRF docs](https://hackrf.readthedocs.io/en/latest/hackrf_one.html),
 [tinySA](https://www.cnx-software.com/2025/12/15/tinysa-is-a-low-cost-handheld-spectrum-analyzer-with-built-in-signal-generator/),

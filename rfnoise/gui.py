@@ -66,7 +66,9 @@ DEVICE_OPTION_FIELDS: Dict[str, List[Tuple[str, str, str, Any]]] = {
     ],
     "tinysa": [
         ("port", "serial port", "text", ""),
-        ("mode", "burst mode (sweep/cw)", "text", "sweep"),
+        ("mode", "burst mode", "choice", "sweep"),
+        ("chirp_time", "chirp time (s)", "float", 0.01),
+        ("output_stage", "output path", "choice", "auto"),
         ("level", "output level (dBm)", "int", -30),
         ("baudrate", "baud rate", "int", 115200),
     ],
@@ -75,6 +77,12 @@ DEVICE_OPTION_FIELDS: Dict[str, List[Tuple[str, str, str, Any]]] = {
         ("amp", "enable TX amplifier", "bool", False),
     ],
     "rtlsdr": [],
+}
+
+# Options for ``choice`` device-option fields, keyed by option name.
+DEVICE_OPTION_CHOICES: Dict[str, List[str]] = {
+    "mode": ["hold", "sweep", "chirp"],
+    "output_stage": ["auto", "normal", "mixer"],
 }
 
 
@@ -137,8 +145,15 @@ DEVICE_OPTION_TIPS: Dict[str, str] = {
     "verbose": "Print detailed per-hop logging to the console.",
     "port": "Serial port the tinySA is connected to (e.g. /dev/ttyACM0 or "
             "COM3). Blank = auto-detect.",
-    "mode": "Burst mode: 'sweep' sweeps across the hop bandwidth, 'cw' emits a "
-            "single continuous tone.",
+    "mode": "Burst mode -- what the carrier does during each hop: 'hold' parks a "
+            "single tone at the band centre, 'sweep' sweeps across the band once "
+            "over the dwell, 'chirp' sweeps fast and repeatedly (rising tone).",
+    "chirp_time": "Sweep duration for 'chirp' mode, in seconds (e.g. 0.01). "
+                  "Shorter = faster, more repeats per dwell. Ignored for other "
+                  "burst modes.",
+    "output_stage": "RF output path. 'auto' picks the fundamental (<=800 MHz) or "
+                    "mixer (>800 MHz) path by frequency; force 'normal'/'mixer' "
+                    "if the auto choice is wrong for your unit.",
     "level": "tinySA output level, in dBm.",
     "baudrate": "Serial connection speed. Match the device's configured baud "
                 "rate.",
@@ -632,6 +647,11 @@ def run_gui(session: Optional[Session] = None) -> None:
                     val = int(val)
                 except (TypeError, ValueError):
                     continue
+            elif kind == "float":
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    continue
             opts[key] = val
         return opts
 
@@ -719,6 +739,15 @@ def run_gui(session: Optional[Session] = None) -> None:
             elif kind == "int":
                 dpg.add_input_int(label=label, tag=tag, default_value=int(value),
                                   step=0, width=160, parent="devopts_group")
+            elif kind == "float":
+                dpg.add_input_float(label=label, tag=tag,
+                                    default_value=float(value), step=0, width=160,
+                                    parent="devopts_group")
+            elif kind == "choice":
+                choices = DEVICE_OPTION_CHOICES.get(key, [str(value)])
+                dpg.add_combo(choices, label=label, tag=tag,
+                              default_value=str(value), width=200,
+                              parent="devopts_group")
             else:  # text
                 dpg.add_input_text(label=label, tag=tag, default_value=str(value),
                                    width=200, parent="devopts_group")

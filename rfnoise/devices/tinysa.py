@@ -102,6 +102,15 @@ _DISCONNECT_ERRNOS = frozenset({errno.EIO, errno.ENODEV, errno.ENXIO, errno.EBAD
 _RECONNECT_ATTEMPTS = 6
 _RECONNECT_DELAY_S = 0.5
 
+# Burst modes: what the carrier does during a hop's dwell.
+#   hold  -- park a single CW carrier at the band centre (zero span).
+#   sweep -- sweep across the band once over the dwell (sweeptime = dwell).
+#   chirp -- sweep across the band fast and repeatedly over the dwell
+#            (sweeptime = ``chirp_time``), for a rising-tone effect.
+_BURST_MODES = ("hold", "sweep", "chirp")
+# Default sweep duration for chirp mode, in seconds (clamped to sweeptime range).
+_DEFAULT_CHIRP_TIME_S = 0.01
+
 # Opening the USB CDC port toggles DTR, which *resets* the tinySA: it reboots,
 # prints a boot banner, and does not accept commands for a second or two. If we
 # start talking before it is ready, the banner desyncs every response by one and
@@ -149,18 +158,25 @@ class TinySAUltra(RFDevice):
     def __init__(self, port: Optional[str] = None, mode: str = "sweep",
                  level: float = -30.0, default_band_width: Optional[int] = None,
                  baudrate: int = 115200, output_stage: str = "auto",
-                 debug: bool = False,
+                 chirp_time: float = _DEFAULT_CHIRP_TIME_S, debug: bool = False,
                  reconnect_attempts: int = _RECONNECT_ATTEMPTS,
                  reconnect_delay: float = _RECONNECT_DELAY_S, **options):
         super().__init__(**options)
-        if mode not in ("sweep", "cw"):
-            raise ValueError("tinySA mode must be 'sweep' or 'cw'")
+        # "cw" is the legacy name for the hold burst mode; accept it.
+        if mode == "cw":
+            mode = "hold"
+        if mode not in _BURST_MODES:
+            raise ValueError(
+                "tinySA mode must be 'hold', 'sweep' or 'chirp'"
+            )
         if output_stage not in ("auto", "normal", "mixer"):
             raise ValueError("output_stage must be 'auto', 'normal' or 'mixer'")
         self.port = port
         self.mode = mode
         self.level = float(level)  # default output level in dBm
         self.baudrate = baudrate
+        # Sweep duration for chirp mode: short so it repeats across the dwell.
+        self.chirp_time = float(chirp_time)
         # Which RF output path to use. "auto" picks normal/mixer by frequency;
         # force "normal" or "mixer" if the auto boundary is wrong for your unit.
         self.output_stage = output_stage
@@ -188,7 +204,7 @@ class TinySAUltra(RFDevice):
         self._write_retries = 2
         self._write_retry_delay = 0.25
         if default_band_width is None:
-            default_band_width = 1_000_000 if mode == "sweep" else 100_000
+            default_band_width = 100_000 if mode == "hold" else 1_000_000
         self.capabilities = DeviceCapabilities(
             name="tinySA Ultra",
             can_transmit=True,
@@ -630,10 +646,13 @@ class TinySAUltra(RFDevice):
         self._clear_modulation()
         if power_dbm is not None:
             self._set_level(power_dbm)
-        if self.mode == "cw":
+        if self.mode == "hold":
+            # Park a single carrier at the band centre for the dwell.
             self._send(_COMMANDS["cw"].format(freq=center))
         else:
-            self._set_sweeptime(dwell_s)    # set duration while idle...
+            # sweep: one pass over the dwell; chirp: fast repeated passes.
+            sweeptime = self.chirp_time if self.mode == "chirp" else dwell_s
+            self._set_sweeptime(sweeptime)  # set duration while idle...
             self._send(_COMMANDS["sweep"].format(start=int(start_hz), stop=int(stop_hz)))
         self._enable_output()               # ...then transmit for the dwell
         self._dwell(dwell_s)

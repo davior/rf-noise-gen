@@ -131,8 +131,15 @@ def _edit_device_options(session: Session) -> None:
     key = session.device
     opts = session.device_options
     if key == "tinysa":
-        mode = _prompt("  tinySA burst mode (sweep/cw)", opts.get("mode", "sweep"))
-        opts["mode"] = "cw" if mode.lower().startswith("c") else "sweep"
+        print("  burst mode: [h]old (CW carrier)  [s]weep (once/dwell)  "
+              "[c]hirp (fast repeat)")
+        cur = opts.get("mode", "sweep")
+        mode = _prompt("  burst mode (h/s/c)",
+                       {"hold": "h", "chirp": "c"}.get(cur, "s")).lower()[:1]
+        opts["mode"] = {"h": "hold", "c": "chirp"}.get(mode, "sweep")
+        if opts["mode"] == "chirp":
+            opts["chirp_time"] = _prompt_float("  chirp sweep time (s)",
+                                               float(opts.get("chirp_time", 0.01)))
         opts["port"] = _prompt("  serial port (blank for later)", opts.get("port", ""))
     elif key == "hackrf":
         opts["txvga_gain"] = int(_prompt_float("  TX VGA gain (0-47)", opts.get("txvga_gain", 30)))

@@ -48,6 +48,39 @@ def test_tinysa_rejects_bad_mode():
         TinySAUltra(mode="bogus")
 
 
+def test_tinysa_cw_is_alias_for_hold():
+    assert TinySAUltra(mode="cw").mode == "hold"
+    assert TinySAUltra(mode="hold").mode == "hold"
+
+
+def _sweep_writes(dev, start, stop, dwell):
+    dev._serial = _StreamingSerial()
+    dev.broadcast(start, stop, dwell)
+    return [w.decode() for w in dev._serial.writes]
+
+
+def test_tinysa_hold_mode_parks_a_single_carrier():
+    dev = TinySAUltra(port="/dev/null", mode="hold")
+    writes = _sweep_writes(dev, 450_000_000, 455_000_000, 0.13)
+    center = (450_000_000 + 455_000_000) // 2
+    assert any(f"sweep {center} {center}" in w for w in writes)  # zero span
+    assert not any("sweeptime" in w for w in writes)
+
+
+def test_tinysa_sweep_mode_uses_dwell_as_sweeptime():
+    dev = TinySAUltra(port="/dev/null", mode="sweep")
+    writes = _sweep_writes(dev, 450_000_000, 455_000_000, 0.13)
+    assert any("sweeptime 0.130" in w for w in writes)
+    assert any("sweep 450000000 455000000" in w for w in writes)
+
+
+def test_tinysa_chirp_mode_uses_short_sweeptime():
+    dev = TinySAUltra(port="/dev/null", mode="chirp", chirp_time=0.01)
+    writes = _sweep_writes(dev, 450_000_000, 455_000_000, 0.13)
+    assert any("sweeptime 0.010" in w for w in writes)  # chirp_time, not dwell
+    assert any("sweep 450000000 455000000" in w for w in writes)
+
+
 def test_rtlsdr_is_receive_only():
     dev = RTLSDR()
     assert dev.can_transmit is False
