@@ -266,25 +266,42 @@ class TinySAUltra(RFDevice):
                 except Exception:  # pragma: no cover - best effort
                     pass
 
+        self._dbg("settle: begin (waiting for the device to finish booting)")
         deadline = time.monotonic() + _SETTLE_MAX_S
+        attempt = 0
         while time.monotonic() < deadline:
+            attempt += 1
             _flush_in()
             try:
                 ser.write(b"\r")
                 ser.flush()
             except Exception as exc:  # still booting -> not accepting writes yet
                 if serial is not None and isinstance(exc, serial.SerialException):
+                    self._dbg(f"settle: ping {attempt} write stalled ({exc}); "
+                              "device still booting")
                     time.sleep(_SETTLE_PING_GAP_S)
                     continue
                 raise
-            ser.read_until(_PROMPT)             # consume the CR's prompt
+            resp = ser.read_until(_PROMPT)      # consume the CR's prompt
             time.sleep(_SETTLE_QUIET_S)         # let any trailing boot bytes land
-            if not getattr(ser, "in_waiting", 0):
+            trailing = getattr(ser, "in_waiting", 0)
+            self._dbg(f"settle: ping {attempt} -> {resp[:60]!r}, "
+                      f"trailing={trailing}")
+            if not trailing:
                 _flush_in()                     # clean, aligned -> done
+                self._dbg(f"settle: aligned after {attempt} ping(s)")
                 return
             time.sleep(_SETTLE_PING_GAP_S)      # more chatter -> keep waiting
         # Deadline hit: proceed anyway; a residual desync will surface as a
         # write stall which the caller's retry/reconnect handles.
+        self._dbg("settle: DEADLINE hit without a clean prompt -- the device "
+                  "may be wedged/boot-looping; a power-cycle is likely needed")
+
+    def _dbg(self, msg: str) -> None:
+        if self.debug:
+            import sys
+            sys.stderr.write(f"[tinysa] {msg}\n")
+            sys.stderr.flush()
 
     def _arm_output(self) -> None:
         """Enter generator mode and set a clean baseline (open and reconnect).
