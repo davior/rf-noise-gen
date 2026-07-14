@@ -86,6 +86,13 @@ _PROMPT = b"ch> "
 # forever instead of raising.
 _WRITE_TIMEOUT_S = 2.0
 
+# Read timeout. Some commands are slow to answer -- switching to ``mode output``
+# and setting ``level`` can take ~1 s while the device reconfigures its output
+# hardware. If the read gives up before the ``ch>`` prompt arrives, every
+# subsequent response reads one-behind and the link desyncs, so this must exceed
+# the slowest command's response time by a comfortable margin.
+_READ_TIMEOUT_S = 3.0
+
 # OS errno values that mean "the device fell off the USB bus" (re-enumeration or
 # a brown-out, e.g. RF from our own transmit coupling into the USB). The port
 # node often reappears with the same name, so reopening it recovers the run.
@@ -216,7 +223,8 @@ class TinySAUltra(RFDevice):
         """Open the serial port and wait out the reset the device does on open."""
         serial = _import_serial(required=True)
         ser = serial.Serial(
-            port, self.baudrate, timeout=1, write_timeout=_WRITE_TIMEOUT_S
+            port, self.baudrate, timeout=_READ_TIMEOUT_S,
+            write_timeout=_WRITE_TIMEOUT_S,
         )
         self._settle(ser)
         return ser
@@ -460,6 +468,11 @@ class TinySAUltra(RFDevice):
         if self._serial is None:  # pragma: no cover - guarded by open()
             raise DeviceError("tinySA: serial port not open")
         t0 = time.monotonic()
+        # Clear any unread tail from the previous command before writing this
+        # one, so a late-arriving prompt can never be misread as this command's
+        # response. Combined with a read timeout longer than the slowest reply,
+        # each command reads exactly its own echo + prompt (no desync).
+        self._safe_reset_input()
         for attempt in range(self._write_retries + 1):
             try:
                 self._write_flush(command)
