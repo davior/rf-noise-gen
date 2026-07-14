@@ -71,6 +71,7 @@ DEVICE_OPTION_FIELDS: Dict[str, List[Tuple[str, str, str, Any]]] = {
         ("output_stage", "output path", "choice", "auto"),
         ("level", "output level (dBm)", "int", -30),
         ("baudrate", "baud rate", "int", 115200),
+        ("debug", "debug log (stderr)", "bool", False),
     ],
     "hackrf": [
         ("txvga_gain", "TX VGA gain (0-47)", "int", 30),
@@ -157,6 +158,8 @@ DEVICE_OPTION_TIPS: Dict[str, str] = {
     "level": "tinySA output level, in dBm.",
     "baudrate": "Serial connection speed. Match the device's configured baud "
                 "rate.",
+    "debug": "Log every tinySA serial command + response + timing to stderr "
+             "(launch rfnoise from a terminal to see it). For diagnosing stalls.",
     "txvga_gain": "HackRF transmit VGA gain (0-47). Higher = stronger output.",
     "amp": "Enable the HackRF's extra TX amplifier stage for more output "
            "power.",
