@@ -41,6 +41,7 @@ from .devices import (
     device_keys,
     get_device_class,
 )
+from .devices.base import ModSource
 from .engine import ConfigurationError, NoiseGenerator
 from .freq import format_freq, parse_freq
 from .model import FrequencyRange, Session
@@ -65,15 +66,24 @@ DEVICE_OPTION_FIELDS: Dict[str, List[Tuple[str, str, str, Any]]] = {
     ],
     "tinysa": [
         ("port", "serial port", "text", ""),
-        ("mode", "burst mode (sweep/cw)", "text", "sweep"),
+        ("mode", "burst mode", "choice", "sweep"),
+        ("chirp_time", "chirp time (s)", "float", 0.01),
+        ("output_stage", "output path", "choice", "auto"),
         ("level", "output level (dBm)", "int", -30),
         ("baudrate", "baud rate", "int", 115200),
+        ("debug", "debug log (stderr)", "bool", False),
     ],
     "hackrf": [
         ("txvga_gain", "TX VGA gain (0-47)", "int", 30),
         ("amp", "enable TX amplifier", "bool", False),
     ],
     "rtlsdr": [],
+}
+
+# Options for ``choice`` device-option fields, keyed by option name.
+DEVICE_OPTION_CHOICES: Dict[str, List[str]] = {
+    "mode": ["hold", "sweep", "chirp"],
+    "output_stage": ["auto", "normal", "mixer"],
 }
 
 
@@ -93,6 +103,20 @@ SETTING_TIPS: Dict[str, str] = {
                    "order from lowest to highest, then repeats; 'sweep_in_band' "
                    "covers each range's full width by stepping across it during "
                    "one dwell (uses the device's native sweep where available).",
+    "f_modulation": "What rides on the carrier. 'none' is plain CW/noise; 'am' "
+                    "and 'fm' impose amplitude/frequency modulation. IQ devices "
+                    "(HackRF, mock) need the [dsp] extra; the tinySA uses a fixed "
+                    "internal tone. A device that can't emit the choice falls back "
+                    "to plain output with a warning.",
+    "f_mod_source": "What drives AM/FM: a pure 'tone' or broadband 'noise'. "
+                    "Noise needs a full-IQ device; on the tinySA it falls back "
+                    "to a tone.",
+    "f_depth": "AM modulation depth, 0..1 (blank = device default). Only used "
+               "when modulation is 'am'.",
+    "f_deviation": "FM peak frequency deviation, in Hz (blank = default). Only "
+                   "used when modulation is 'fm'.",
+    "f_tone": "Modulating tone frequency in Hz (blank = default). Used when the "
+              "source is 'tone'.",
     "f_seed": "Seed for the random hop sequence. Leave blank for a fresh "
               "random pattern each run; set a value to reproduce the exact "
               "same sequence.",
@@ -122,11 +146,20 @@ DEVICE_OPTION_TIPS: Dict[str, str] = {
     "verbose": "Print detailed per-hop logging to the console.",
     "port": "Serial port the tinySA is connected to (e.g. /dev/ttyACM0 or "
             "COM3). Blank = auto-detect.",
-    "mode": "Burst mode: 'sweep' sweeps across the hop bandwidth, 'cw' emits a "
-            "single continuous tone.",
+    "mode": "Burst mode -- what the carrier does during each hop: 'hold' parks a "
+            "single tone at the band centre, 'sweep' sweeps across the band once "
+            "over the dwell, 'chirp' sweeps fast and repeatedly (rising tone).",
+    "chirp_time": "Sweep duration for 'chirp' mode, in seconds (e.g. 0.01). "
+                  "Shorter = faster, more repeats per dwell. Ignored for other "
+                  "burst modes.",
+    "output_stage": "RF output path. 'auto' picks the fundamental (<=800 MHz) or "
+                    "mixer (>800 MHz) path by frequency; force 'normal'/'mixer' "
+                    "if the auto choice is wrong for your unit.",
     "level": "tinySA output level, in dBm.",
     "baudrate": "Serial connection speed. Match the device's configured baud "
                 "rate.",
+    "debug": "Log every tinySA serial command + response + timing to stderr "
+             "(launch rfnoise from a terminal to see it). For diagnosing stalls.",
     "txvga_gain": "HackRF transmit VGA gain (0-47). Higher = stronger output.",
     "amp": "Enable the HackRF's extra TX amplifier stage for more output "
            "power.",
@@ -186,6 +219,15 @@ def collect_session(values: Dict[str, Any], rows: List[Dict[str, str]],
     if pmin is not None and pmax is not None and pmax < pmin:
         pmin, pmax = pmax, pmin
 
+    modulation = values.get("modulation") or "none"
+    mod_source = None
+    depth = deviation = tone = None
+    if modulation != "none":
+        mod_source = values.get("mod_source") or "tone"
+        depth = _parse_optional_float(values.get("depth", ""))
+        deviation = _parse_optional_float(values.get("deviation", ""))
+        tone = _parse_optional_float(values.get("tone", ""))
+
     return Session(
         name=(values.get("name") or "untitled").strip() or "untitled",
         device=device,
@@ -194,6 +236,11 @@ def collect_session(values: Dict[str, Any], rows: List[Dict[str, str]],
         dwell_seconds=float(values.get("dwell", 0.5) or 0.5),
         overlap=float(values.get("overlap", 0.0) or 0.0),
         traversal=values.get("traversal") or "random_hop",
+        modulation=modulation,
+        mod_source=mod_source,
+        depth=depth,
+        deviation_hz=deviation,
+        tone_hz=tone,
         seed=_parse_optional_int(values.get("seed", "")),
         pause_seconds=float(values.get("pause_seconds", 0.0) or 0.0),
         pause_every_hops=int(values.get("pause_every", 0) or 0),
@@ -209,6 +256,11 @@ def session_to_form(session: Session) -> Tuple[Dict[str, Any], List[Dict[str, st
         "dwell": session.dwell_seconds,
         "overlap": session.overlap,
         "traversal": session.traversal.value,
+        "modulation": session.modulation.value,
+        "mod_source": (session.mod_source or ModSource.TONE).value,
+        "depth": "" if session.depth is None else f"{session.depth:g}",
+        "deviation": "" if session.deviation_hz is None else f"{session.deviation_hz:g}",
+        "tone": "" if session.tone_hz is None else f"{session.tone_hz:g}",
         "seed": "" if session.seed is None else str(session.seed),
         "pause_seconds": session.pause_seconds,
         "pause_every": session.pause_every_hops,
@@ -354,6 +406,10 @@ class DecayPlotModel:
 DEFAULT_DBM_RANGE: Tuple[float, float] = (-100.0, 10.0)
 NO_POWER_DBM: float = 0.0  # y for hops with no strength info (no power range)
 HZ_PER_MHZ: float = 1_000_000.0  # X axis is displayed in MHz, not Hz
+
+# Target render-loop period (~60 fps). Pacing the loop keeps it from busy-spinning
+# and starving the engine's serial worker thread (see run_gui's main loop).
+_FRAME_INTERVAL_S: float = 1.0 / 60.0
 
 
 def frequency_extent(session: Session) -> Optional[Tuple[float, float]]:
@@ -598,6 +654,11 @@ def run_gui(session: Optional[Session] = None) -> None:
                     val = int(val)
                 except (TypeError, ValueError):
                     continue
+            elif kind == "float":
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    continue
             opts[key] = val
         return opts
 
@@ -607,6 +668,11 @@ def run_gui(session: Optional[Session] = None) -> None:
             "dwell": dpg.get_value("f_dwell"),
             "overlap": dpg.get_value("f_overlap"),
             "traversal": dpg.get_value("f_traversal"),
+            "modulation": dpg.get_value("f_modulation"),
+            "mod_source": dpg.get_value("f_mod_source"),
+            "depth": dpg.get_value("f_depth"),
+            "deviation": dpg.get_value("f_deviation"),
+            "tone": dpg.get_value("f_tone"),
             "seed": dpg.get_value("f_seed"),
             "pause_seconds": dpg.get_value("f_pause_seconds"),
             "pause_every": dpg.get_value("f_pause_every"),
@@ -680,6 +746,15 @@ def run_gui(session: Optional[Session] = None) -> None:
             elif kind == "int":
                 dpg.add_input_int(label=label, tag=tag, default_value=int(value),
                                   step=0, width=160, parent="devopts_group")
+            elif kind == "float":
+                dpg.add_input_float(label=label, tag=tag,
+                                    default_value=float(value), step=0, width=160,
+                                    parent="devopts_group")
+            elif kind == "choice":
+                choices = DEVICE_OPTION_CHOICES.get(key, [str(value)])
+                dpg.add_combo(choices, label=label, tag=tag,
+                              default_value=str(value), width=200,
+                              parent="devopts_group")
             else:  # text
                 dpg.add_input_text(label=label, tag=tag, default_value=str(value),
                                    width=200, parent="devopts_group")
@@ -697,6 +772,11 @@ def run_gui(session: Optional[Session] = None) -> None:
         dpg.set_value("f_dwell", float(values["dwell"]))
         dpg.set_value("f_overlap", float(values["overlap"]))
         dpg.set_value("f_traversal", values["traversal"])
+        dpg.set_value("f_modulation", values["modulation"])
+        dpg.set_value("f_mod_source", values["mod_source"])
+        dpg.set_value("f_depth", values["depth"])
+        dpg.set_value("f_deviation", values["deviation"])
+        dpg.set_value("f_tone", values["tone"])
         dpg.set_value("f_seed", values["seed"])
         dpg.set_value("f_pause_seconds", float(values["pause_seconds"]))
         dpg.set_value("f_pause_every", int(values["pause_every"]))
@@ -886,6 +966,27 @@ def run_gui(session: Optional[Session] = None) -> None:
                               label="tuning mode", tag="f_traversal",
                               default_value=session.traversal.value, width=200)
                 add_tip("f_traversal", SETTING_TIPS["f_traversal"])
+                with dpg.group(horizontal=True):
+                    dpg.add_combo(["none", "am", "fm"], label="modulation",
+                                  tag="f_modulation",
+                                  default_value=session.modulation.value, width=90)
+                    add_tip("f_modulation", SETTING_TIPS["f_modulation"])
+                    dpg.add_combo(["tone", "noise"], label="source",
+                                  tag="f_mod_source",
+                                  default_value=_initial_values["mod_source"],
+                                  width=90)
+                    add_tip("f_mod_source", SETTING_TIPS["f_mod_source"])
+                with dpg.group(horizontal=True):
+                    dpg.add_input_text(label="AM depth", tag="f_depth",
+                                       default_value=_initial_values["depth"], width=70)
+                    add_tip("f_depth", SETTING_TIPS["f_depth"])
+                    dpg.add_input_text(label="FM dev (Hz)", tag="f_deviation",
+                                       default_value=_initial_values["deviation"],
+                                       width=80)
+                    add_tip("f_deviation", SETTING_TIPS["f_deviation"])
+                    dpg.add_input_text(label="tone (Hz)", tag="f_tone",
+                                       default_value=_initial_values["tone"], width=80)
+                    add_tip("f_tone", SETTING_TIPS["f_tone"])
                 dpg.add_input_text(label="seed (blank=random)", tag="f_seed",
                                    default_value="" if session.seed is None else str(session.seed),
                                    width=160)
@@ -999,8 +1100,18 @@ def run_gui(session: Optional[Session] = None) -> None:
 
     try:
         while dpg.is_dearpygui_running():
+            frame_start = time.monotonic()
             refresh_plot()
             dpg.render_dearpygui_frame()
+            # Pace the loop to ~60 fps. Without this the render loop is a busy
+            # spin that pins a core and holds the GIL, starving the engine's
+            # worker thread -- fatal for a device that does blocking serial reads
+            # (the tinySA), whose read_until then times out mid-response. The
+            # sleep releases the GIL so the worker gets regular CPU time.
+            elapsed = time.monotonic() - frame_start
+            # Floor the sleep so even a slow frame still yields the GIL to the
+            # worker (a busy frame must never fully starve the serial reads).
+            time.sleep(max(0.003, _FRAME_INTERVAL_S - elapsed))
     finally:
         # Never leave a worker transmitting after the window is gone.
         if controller.running:

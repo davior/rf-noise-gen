@@ -2,26 +2,30 @@
 
 The tinySA Ultra's built-in signal generator emits a single CW carrier -- it
 does not have a wide instantaneous bandwidth like an SDR. Two burst modes are
-therefore supported:
+supported:
 
 * ``"sweep"`` (default): sweep the carrier across the selected band for the
   dwell time, emulating a wideband splatter across the slice.
 * ``"cw"``: park a single tone at the band centre for the dwell time.
 
-Output stage is chosen automatically by frequency:
-  * sine   100 kHz - 800 MHz
-  * square 800 MHz - 4.4 GHz
-  * mixing 4.4 GHz - 5.4 GHz
+**The device must be put into generator (output) mode with ``mode output``**
+before it will transmit; otherwise ``sweep`` just runs a spectrum *scan* (which
+also floods the serial port). The output path is selected per hop:
 
-.. warning::
-   The exact serial command strings vary between tinySA firmware revisions and
-   could not be verified against hardware in this environment. They are grouped
-   in :data:`_COMMANDS` below; verify/adjust them against your firmware's
-   ``help`` output before trusting the RF output. Requires ``pyserial``.
+  * ``output normal`` -- fundamental output, up to ~800 MHz
+  * ``output mixer``  -- mixer/harmonic output, above ~800 MHz
+
+.. note::
+   Command strings here were checked against firmware ``tinySA4_v1.4`` (the
+   ``help``/usage output: ``mode [low] input|output``,
+   ``modulation off|am|fm|freq|depth|deviation 100..6000``, ``level -76..-6``,
+   ``sweeptime 0.003..60``, ``output on|off|normal|mixer``). Other revisions may
+   differ; they are grouped in :data:`_COMMANDS`. Requires ``pyserial``.
 """
 
 from __future__ import annotations
 
+import errno
 import time
 from typing import Optional
 
@@ -34,23 +38,26 @@ from .base import (
 )
 
 # Serial commands, centralised so they are easy to correct per firmware.
-# ``{freq}`` is an integer in Hz; ``{start}``/``{stop}`` likewise; ``{dbm}`` is
-# an integer output level in dBm within the device's -110..-20 dBm range.
+# ``{freq}``/``{start}``/``{stop}`` are integer Hz; ``{dbm}`` an integer level.
 _COMMANDS = {
-    "cw": "sweep {freq} {freq} 2\r",           # single point == fixed carrier
-    "sweep": "sweep {start} {stop} 450\r",       # sweep across the band
-    "level": "level {dbm}\r",                    # output level in dBm
+    "mode_output": "mode output\r",              # enter signal-generator mode
     "output_on": "output on\r",
     "output_off": "output off\r",
-    # -- fixed-tone modulation (FIRMWARE-SPECIFIC; verify before trusting RF) --
-    # The tinySA Ultra can impose a crude AM/FM on the parked CW carrier using
-    # its own internal tone -- it has no arbitrary IQ path, so only a tone
-    # source is possible. ``{tone}`` is the modulating tone in Hz, ``{depth}``
-    # the AM depth in percent (0-100), ``{deviation}`` the FM peak deviation in
-    # Hz. Command spellings vary by firmware; adjust against its ``help``.
-    "am": "am {tone} {depth}\r",
-    "fm": "fm {tone} {deviation}\r",
+    "output_normal": "output normal\r",          # fundamental output path
+    "output_mixer": "output mixer\r",            # mixer/harmonic output path
+    "level": "level {dbm}\r",                    # output level, -76..-6 dBm
+    "sweep": "sweep {start} {stop}\r",           # sweep the output across a band
+    "cw": "sweep {freq} {freq}\r",               # zero-span == a fixed carrier
+    "sweeptime": "sweeptime {seconds:.3f}\r",    # sweep duration, 0.003..60 s
+    # -- fixed-tone modulation (firmware ``modulation`` command; tinySA has no
+    # arbitrary-IQ path, so only a tone source is possible). ``{hz}`` is the
+    # internal tone / FM deviation in Hz (100..6000); ``{value}`` the AM depth. --
     "mod_off": "modulation off\r",
+    "mod_am": "modulation am\r",
+    "mod_fm": "modulation fm\r",
+    "mod_freq": "modulation freq {hz}\r",
+    "mod_depth": "modulation depth {value}\r",
+    "mod_deviation": "modulation deviation {hz}\r",
 }
 
 # Internal modulating-tone defaults when a session leaves them unset. Kept local
@@ -58,10 +65,16 @@ _COMMANDS = {
 _DEFAULT_TONE_HZ = 1_000
 _DEFAULT_AM_DEPTH_PCT = 50
 _DEFAULT_FM_DEVIATION_HZ = 5_000
+# Firmware limits for ``modulation freq``/``deviation`` (Hz).
+_MOD_HZ_MIN = 100
+_MOD_HZ_MAX = 6_000
+# Frequency at/below which the fundamental ("normal") output path is used;
+# above it the mixer path is needed.
+_NORMAL_OUTPUT_MAX_HZ = 800_000_000
 
-# Output level range of the tinySA Ultra signal generator.
-POWER_MIN_DBM = -110.0
-POWER_MAX_DBM = -20.0
+# Output level range of the tinySA Ultra signal generator (``level -76..-6``).
+POWER_MIN_DBM = -76.0
+POWER_MAX_DBM = -6.0
 
 # The tinySA shell echoes each command and prints this prompt when it is ready
 # for the next one. We read up to it after every command so the OS input buffer
@@ -72,6 +85,54 @@ _PROMPT = b"ch> "
 # Without this the pyserial default (``None``) lets a full-buffer write hang
 # forever instead of raising.
 _WRITE_TIMEOUT_S = 2.0
+
+# Read timeout. Some commands are slow to answer -- switching to ``mode output``
+# and setting ``level`` can take ~1 s while the device reconfigures its output
+# hardware. If the read gives up before the ``ch>`` prompt arrives, every
+# subsequent response reads one-behind and the link desyncs, so this must exceed
+# the slowest command's response time by a comfortable margin.
+_READ_TIMEOUT_S = 3.0
+
+# OS errno values that mean "the device fell off the USB bus" (re-enumeration or
+# a brown-out, e.g. RF from our own transmit coupling into the USB). The port
+# node often reappears with the same name, so reopening it recovers the run.
+_DISCONNECT_ERRNOS = frozenset({errno.EIO, errno.ENODEV, errno.ENXIO, errno.EBADF})
+
+# Reconnect policy when the device drops mid-run.
+_RECONNECT_ATTEMPTS = 6
+_RECONNECT_DELAY_S = 0.5
+
+# Burst modes: what the carrier does during a hop's dwell.
+#   hold  -- park a single CW carrier at the band centre (zero span).
+#   sweep -- sweep across the band once over the dwell (sweeptime = dwell).
+#   chirp -- sweep across the band fast and repeatedly over the dwell
+#            (sweeptime = ``chirp_time``), for a rising-tone effect.
+_BURST_MODES = ("hold", "sweep", "chirp")
+# Default sweep duration for chirp mode, in seconds (clamped to sweeptime range).
+_DEFAULT_CHIRP_TIME_S = 0.01
+
+# Opening the USB CDC port toggles DTR, which *resets* the tinySA: it reboots,
+# prints a boot banner, and does not accept commands for a second or two. If we
+# start talking before it is ready, the banner desyncs every response by one and
+# the mistimed commands wedge it. So after opening we actively ping it (bare CR)
+# until it answers with a clean prompt and nothing trailing -- i.e. it has
+# finished booting and the link is byte-aligned. Bounded by a hard deadline.
+_SETTLE_MAX_S = 8.0        # give the reboot up to this long to complete
+_SETTLE_PING_GAP_S = 0.3   # wait between ping attempts while it is still booting
+_SETTLE_QUIET_S = 0.15     # after a prompt, no new bytes for this long == synced
+
+
+def _import_serial(required: bool = False):
+    """Return the pyserial module, ``None`` if absent (unless ``required``)."""
+    try:
+        import serial  # type: ignore
+        return serial
+    except ImportError as exc:  # pragma: no cover - depends on env
+        if required:
+            raise DeviceError(
+                "tinySA requires pyserial (pip install rfnoise[hardware])"
+            ) from exc
+        return None
 
 
 def _mode_for(hz: int) -> str:
@@ -96,16 +157,54 @@ class TinySAUltra(RFDevice):
 
     def __init__(self, port: Optional[str] = None, mode: str = "sweep",
                  level: float = -30.0, default_band_width: Optional[int] = None,
-                 baudrate: int = 115200, **options):
+                 baudrate: int = 115200, output_stage: str = "auto",
+                 chirp_time: float = _DEFAULT_CHIRP_TIME_S, debug: bool = False,
+                 reconnect_attempts: int = _RECONNECT_ATTEMPTS,
+                 reconnect_delay: float = _RECONNECT_DELAY_S, **options):
         super().__init__(**options)
-        if mode not in ("sweep", "cw"):
-            raise ValueError("tinySA mode must be 'sweep' or 'cw'")
+        # "cw" is the legacy name for the hold burst mode; accept it.
+        if mode == "cw":
+            mode = "hold"
+        if mode not in _BURST_MODES:
+            raise ValueError(
+                "tinySA mode must be 'hold', 'sweep' or 'chirp'"
+            )
+        if output_stage not in ("auto", "normal", "mixer"):
+            raise ValueError("output_stage must be 'auto', 'normal' or 'mixer'")
         self.port = port
         self.mode = mode
         self.level = float(level)  # default output level in dBm
         self.baudrate = baudrate
+        # Sweep duration for chirp mode: short so it repeats across the dwell.
+        self.chirp_time = float(chirp_time)
+        # Which RF output path to use. "auto" picks normal/mixer by frequency;
+        # force "normal" or "mixer" if the auto boundary is wrong for your unit.
+        self.output_stage = output_stage
+        # When True, log every command sent + the device's response + timing to
+        # stderr (for diagnosing which command the firmware rejects or stalls on).
+        self.debug = bool(debug)
+        # How hard to try to recover when the device drops off USB mid-run.
+        # ``reconnect_attempts <= 0`` disables recovery (fail fast instead).
+        self.reconnect_attempts = int(reconnect_attempts)
+        self.reconnect_delay = float(reconnect_delay)
+        self._reconnecting = False
+        # State so we only re-send a command when it actually changes hop to hop
+        # (fewer serial round-trips -> faster, less chance of overflow).
+        self._stage: Optional[str] = None
+        self._mod_on = False
+        self._last_level: Optional[int] = None
+        self._last_sweeptime: Optional[float] = None
+        # Whether RF output is currently enabled. We keep TX OFF while sending
+        # config commands, because the device's own radiated RF can couple into
+        # its USB and wedge the serial link (write timeout) -- so all commands go
+        # out with output off, then output is enabled just for the dwell.
+        self._tx_on = False
+        # A stray write timeout (transient EMI wedge) is retried this many times
+        # after a short pause before it is treated as fatal.
+        self._write_retries = 2
+        self._write_retry_delay = 0.25
         if default_band_width is None:
-            default_band_width = 1_000_000 if mode == "sweep" else 100_000
+            default_band_width = 100_000 if mode == "hold" else 1_000_000
         self.capabilities = DeviceCapabilities(
             name="tinySA Ultra",
             can_transmit=True,
@@ -131,22 +230,153 @@ class TinySAUltra(RFDevice):
         self._serial = None
 
     def _set_level(self, dbm: float) -> None:
-        self._send(_COMMANDS["level"].format(dbm=int(round(self.capabilities.clamp_power(dbm)))))
+        lvl = int(round(self.capabilities.clamp_power(dbm)))
+        if lvl != self._last_level:
+            self._send(_COMMANDS["level"].format(dbm=lvl))
+            self._last_level = lvl
+
+    def _open_serial(self, port: str):
+        """Open the serial port and wait out the reset the device does on open."""
+        serial = _import_serial(required=True)
+        ser = serial.Serial(
+            port, self.baudrate, timeout=_READ_TIMEOUT_S,
+            write_timeout=_WRITE_TIMEOUT_S,
+        )
+        self._settle(ser)
+        return ser
+
+    def _settle(self, ser) -> None:
+        """Wait out the reset the device does on open, until it answers cleanly.
+
+        Opening the port reboots the tinySA (DTR): it prints a boot banner and
+        rejects/garbles commands until it is ready. A fixed delay is unreliable
+        (boot time varies, and the banner arrives in bursts). Instead we poll:
+        clear the buffer, send a bare CR, and read to the prompt; if the write
+        stalls or extra bytes keep arriving, it is still booting -- wait and
+        retry. Once a CR yields a lone ``ch>`` with nothing trailing, the reboot
+        is done and the link is aligned, so the first real command reads cleanly.
+        """
+        serial = _import_serial()
+
+        def _flush_in():
+            reset = getattr(ser, "reset_input_buffer", None)
+            if reset is not None:
+                try:
+                    reset()
+                except Exception:  # pragma: no cover - best effort
+                    pass
+
+        self._dbg("settle: begin (waiting for the device to finish booting)")
+        deadline = time.monotonic() + _SETTLE_MAX_S
+        attempt = 0
+        while time.monotonic() < deadline:
+            attempt += 1
+            _flush_in()
+            try:
+                ser.write(b"\r")
+                ser.flush()
+            except Exception as exc:  # still booting -> not accepting writes yet
+                if serial is not None and isinstance(exc, serial.SerialException):
+                    self._dbg(f"settle: ping {attempt} write stalled ({exc}); "
+                              "device still booting")
+                    time.sleep(_SETTLE_PING_GAP_S)
+                    continue
+                raise
+            resp = ser.read_until(_PROMPT)      # consume the CR's prompt
+            time.sleep(_SETTLE_QUIET_S)         # let any trailing boot bytes land
+            trailing = getattr(ser, "in_waiting", 0)
+            self._dbg(f"settle: ping {attempt} -> {resp[:60]!r}, "
+                      f"trailing={trailing}")
+            if not trailing:
+                _flush_in()                     # clean, aligned -> done
+                self._dbg(f"settle: aligned after {attempt} ping(s)")
+                return
+            time.sleep(_SETTLE_PING_GAP_S)      # more chatter -> keep waiting
+        # Deadline hit: proceed anyway; a residual desync will surface as a
+        # write stall which the caller's retry/reconnect handles.
+        self._dbg("settle: DEADLINE hit without a clean prompt -- the device "
+                  "may be wedged/boot-looping; a power-cycle is likely needed")
+
+    def _dbg(self, msg: str) -> None:
+        if self.debug:
+            import sys
+            sys.stderr.write(f"[tinysa] {msg}\n")
+            sys.stderr.flush()
+
+    def _arm_output(self) -> None:
+        """Enter generator mode and set a clean baseline (open and reconnect).
+
+        ``mode output`` is essential: without it the device stays in analyzer
+        mode and ``sweep`` runs a spectrum scan instead of transmitting. We also
+        clear any leftover modulation and set the default level. The per-hop
+        output path and ``output on`` are (re)issued by :meth:`broadcast` /
+        :meth:`_modulate`, so the stage state is reset here to force a resend.
+        """
+        self._send(_COMMANDS["output_off"])
+        self._tx_on = False
+        self._send(_COMMANDS["mode_output"])
+        self._send(_COMMANDS["mod_off"])
+        self._mod_on = False
+        self._stage = None
+        self._last_level = None
+        self._last_sweeptime = None
+        self._set_level(self.level)
+
+    def _stage_for(self, hz: int) -> str:
+        """Return the output path ("normal"/"mixer") for a carrier frequency."""
+        if self.output_stage != "auto":
+            return self.output_stage
+        return "normal" if hz <= _NORMAL_OUTPUT_MAX_HZ else "mixer"
+
+    def _ensure_stage(self, hz: int) -> None:
+        """Select the output path for ``hz`` if it differs from the last hop."""
+        stage = self._stage_for(hz)
+        if stage != self._stage:
+            key = "output_normal" if stage == "normal" else "output_mixer"
+            self._send(_COMMANDS[key])
+            self._stage = stage
+
+    def _set_sweeptime(self, dwell_s: float) -> None:
+        """Set the firmware sweep duration to the dwell (clamped to 3ms..60s).
+
+        Only re-sent when it changes -- the dwell is constant within a session,
+        so this is effectively a one-time command.
+        """
+        if dwell_s <= 0:
+            return
+        seconds = round(max(0.003, min(60.0, float(dwell_s))), 3)
+        if seconds != self._last_sweeptime:
+            self._send(_COMMANDS["sweeptime"].format(seconds=seconds))
+            self._last_sweeptime = seconds
+
+    def _enable_output(self) -> None:
+        """Turn RF output on (for the dwell) if not already transmitting."""
+        if not self._tx_on:
+            self._send(_COMMANDS["output_on"])
+            self._tx_on = True
+
+    def _disable_output(self) -> None:
+        """Turn RF output off so config commands go out with the radio quiet.
+
+        Transmitting while writing to the serial port risks an EMI-induced write
+        stall (the radiated carrier couples into the USB). Keeping TX off during
+        the command exchange avoids that; it also gives a genuinely quiet window
+        during a periodic pause.
+        """
+        if self._tx_on:
+            self._send(_COMMANDS["output_off"])
+            self._tx_on = False
+
+    def _clear_modulation(self) -> None:
+        if self._mod_on:
+            self._send(_COMMANDS["mod_off"])
+            self._mod_on = False
 
     def _on_open(self) -> None:
         if not self.port:
             raise DeviceError("tinySA: no serial 'port' configured")
-        try:
-            import serial  # type: ignore
-        except ImportError as exc:  # pragma: no cover - depends on env
-            raise DeviceError(
-                "tinySA requires pyserial (pip install rfnoise[hardware])"
-            ) from exc
-        self._serial = serial.Serial(
-            self.port, self.baudrate, timeout=1, write_timeout=_WRITE_TIMEOUT_S
-        )
-        self._set_level(self.level)
-        self._send(_COMMANDS["output_on"])
+        self._serial = self._open_serial(self.port)
+        self._arm_output()
 
     def _on_close(self) -> None:
         if self._serial is not None:
@@ -157,41 +387,207 @@ class TinySAUltra(RFDevice):
             except DeviceError:
                 pass
             finally:
-                self._serial.close()
+                try:
+                    self._serial.close()
+                except Exception:  # pragma: no cover - already-dead port
+                    pass
                 self._serial = None
+
+    def _classify_error(self, exc: Exception) -> str:
+        """Bucket a serial error: ``"stall"``, ``"disconnect"`` or ``"other"``.
+
+        A *stall* is a write timeout (buffer full, device not draining); a
+        *disconnect* is the device dropping off USB (EIO/ENODEV, or a generic
+        ``SerialException``) -- recoverable by reopening the port.
+        """
+        serial = _import_serial()
+        if serial is not None and isinstance(exc, serial.SerialTimeoutException):
+            return "stall"
+        if isinstance(exc, OSError) and exc.errno in _DISCONNECT_ERRNOS:
+            return "disconnect"
+        if serial is not None and isinstance(exc, serial.SerialException):
+            return "disconnect"
+        return "other"
+
+    def _find_port(self) -> Optional[str]:
+        """Locate the device's port, preferring the configured path.
+
+        After a re-enumeration the node usually reappears under the same name,
+        but it can move (e.g. ``ttyACM0`` -> ``ttyACM1``); fall back to scanning
+        for a tinySA / CDC-ACM port so recovery still works if it does.
+        """
+        import os
+
+        if self.port and os.path.exists(self.port):
+            return self.port
+        try:
+            from serial.tools import list_ports  # type: ignore
+        except Exception:  # pragma: no cover - pyserial always ships this
+            return None
+        ports = list(list_ports.comports())
+        for p in ports:
+            text = f"{p.description or ''} {p.manufacturer or ''}".lower()
+            if "tinysa" in text:
+                return p.device
+        for p in ports:
+            dev = p.device or ""
+            if "ACM" in dev or "usbmodem" in dev:
+                return dev
+        return None
+
+    def _reconnect(self) -> None:
+        """Recover from a mid-run USB drop by reopening and re-arming the port.
+
+        Closes the stale handle, then retries find-port -> open -> re-arm output
+        up to ``reconnect_attempts`` times. Raises :class:`DeviceError` if the
+        device never comes back (truly unplugged / powered off).
+        """
+        if self.reconnect_attempts <= 0:
+            raise DeviceError(
+                "tinySA: device disconnected (I/O error); reconnect disabled. "
+                "Check USB power/cable and RF shielding."
+            )
+        old, self._serial = self._serial, None
+        if old is not None:
+            try:
+                old.close()
+            except Exception:  # pragma: no cover - already-dead port
+                pass
+        self._reconnecting = True
+        last: Optional[Exception] = None
+        try:
+            for _ in range(self.reconnect_attempts):
+                time.sleep(self.reconnect_delay)
+                port = self._find_port()
+                if not port:
+                    continue
+                try:
+                    self._serial = self._open_serial(port)
+                    self.port = port
+                    self._arm_output()
+                except Exception as exc:  # not back yet / still noisy
+                    last = exc
+                    if self._serial is not None:
+                        try:
+                            self._serial.close()
+                        except Exception:  # pragma: no cover
+                            pass
+                        self._serial = None
+                    continue
+                print(f"tinySA: reconnected on {port} after I/O error")
+                return
+        finally:
+            self._reconnecting = False
+        raise DeviceError(
+            f"tinySA: device did not come back after {self.reconnect_attempts} "
+            "reconnect attempts; check USB power/cable and RF shielding"
+            + (f" (last error: {last})" if last else "")
+        )
+
+    def _write_flush(self, command: str) -> None:
+        self._serial.write(command.encode("ascii"))
+        self._serial.flush()
+
+    def _safe_reset_input(self) -> None:
+        ser = self._serial
+        reset = getattr(ser, "reset_input_buffer", None) if ser is not None else None
+        if reset is not None:
+            try:
+                reset()
+            except Exception:  # pragma: no cover - best effort
+                pass
 
     def _send(self, command: str) -> None:
         if self._serial is None:  # pragma: no cover - guarded by open()
             raise DeviceError("tinySA: serial port not open")
-        try:
-            import serial  # type: ignore
-        except ImportError:  # pragma: no cover - open() already imported it
-            serial = None
-        try:
-            self._serial.write(command.encode("ascii"))
-            self._serial.flush()
-        except Exception as exc:  # SerialTimeoutException et al.
-            if serial is not None and isinstance(exc, serial.SerialException):
-                raise DeviceError(
-                    f"tinySA: serial write stalled/failed ({exc}); "
-                    "the device stopped accepting data."
-                ) from exc
-            raise
-        self._drain()
+        t0 = time.monotonic()
+        # Clear any unread tail from the previous command before writing this
+        # one, so a late-arriving prompt can never be misread as this command's
+        # response. Combined with a read timeout longer than the slowest reply,
+        # each command reads exactly its own echo + prompt (no desync).
+        self._safe_reset_input()
+        for attempt in range(self._write_retries + 1):
+            try:
+                self._write_flush(command)
+                break
+            except Exception as exc:
+                kind = self._classify_error(exc)
+                if kind == "disconnect" and not self._reconnecting:
+                    # Device fell off USB (often our own RF): reopen and retry.
+                    self._reconnect()
+                    continue
+                if kind == "stall" and attempt < self._write_retries \
+                        and not self._reconnecting:
+                    # Transient EMI wedge: pause, clear the port, and retry.
+                    time.sleep(self._write_retry_delay)
+                    self._safe_reset_input()
+                    continue
+                if kind == "stall":
+                    raise DeviceError(
+                        f"tinySA: serial write stalled/failed ({exc}); "
+                        "the device stopped accepting data. If it recurs while "
+                        "transmitting, it is RF coupling into the USB -- improve "
+                        "shielding / use a powered hub."
+                    ) from exc
+                raise
+        response = self._drain()
+        if self.debug:
+            import sys
+            dt_ms = (time.monotonic() - t0) * 1000.0
+            sys.stderr.write(
+                f"[tinysa] >> {command.strip()!r}  ({dt_ms:.0f} ms)  "
+                f"<< {response[:120]!r}\n"
+            )
+            sys.stderr.flush()
 
-    def _drain(self) -> None:
-        """Consume the shell's echo/response so the input buffer never fills.
+    def _drain(self) -> bytes:
+        """Consume and return the shell's echo + ``ch>`` prompt after a command.
 
         The tinySA echoes every command and follows it with a ``ch>`` prompt.
-        Nothing here needs that text, but if it is never read the OS input
-        buffer (~4 KB) fills after a hundred-odd hops, back-pressures the port,
-        and the next write blocks forever. Reading up to the prompt after each
-        command keeps the buffer empty; the serial read timeout bounds the wait
-        if a firmware revision omits the prompt.
+        Reading exactly up to that prompt keeps the link byte-aligned: each
+        command's echo is consumed by that command's drain, so the next read
+        can't run one-behind. We deliberately do **not** ``reset_input_buffer``
+        here -- that used to discard an in-flight echo and desync the stream.
+        Alignment is instead established once, at open, by :meth:`_settle`. The
+        read timeout bounds the wait if a firmware revision omits the prompt.
         """
         if self._serial is None:  # pragma: no cover - guarded by callers
+            return b""
+        return self._serial.read_until(_PROMPT) or b""
+
+    def _dwell(self, seconds: float) -> None:
+        """Hold for the dwell while transmitting -- with **no** serial I/O.
+
+        In generator (``mode output``) mode the device does not stream, so there
+        is nothing to drain; and because the carrier is radiating during the
+        dwell, touching the serial port here is exactly when an EMI-induced
+        write/read stall is most likely. So we simply sleep (the port stays
+        idle), then the next hop turns output off before it writes anything.
+        """
+        if seconds > 0:
+            time.sleep(seconds)
+
+    def keep_alive(self) -> None:
+        """Go quiet during a periodic pause: stop transmitting.
+
+        The engine calls this while paused. Turning output off gives a genuinely
+        idle window (the point of a duty-cycle pause) and keeps the carrier from
+        coupling into the USB while we're not actively hopping. The next hop
+        re-enables output.
+        """
+        if self._serial is None:
             return
-        self._serial.read_until(_PROMPT)
+        try:
+            self._disable_output()
+        except Exception as exc:
+            self._recover_or_raise(exc)
+
+    def _recover_or_raise(self, exc: Exception) -> None:
+        """Reconnect on a disconnect error; re-raise anything else."""
+        if self._classify_error(exc) == "disconnect" and not self._reconnecting:
+            self._reconnect()
+        else:
+            raise exc
 
     def emit(self, emission) -> None:
         """Realise a native sweep or fixed-tone modulation; else plain broadcast.
@@ -211,47 +607,69 @@ class TinySAUltra(RFDevice):
             return
         sweep = emission.sweep
         if sweep is not None and sweep.steps > 1:
+            # One native firmware sweep covers the whole span for the dwell --
+            # no Python step retunes.
+            center = (int(sweep.start_hz) + int(sweep.stop_hz)) // 2
+            self._disable_output()          # configure with the radio quiet
+            self._ensure_stage(center)
+            self._clear_modulation()
             if emission.power_dbm is not None:
                 self._set_level(emission.power_dbm)
+            self._set_sweeptime(emission.dwell_s)
             self._send(_COMMANDS["sweep"].format(start=int(sweep.start_hz),
                                                  stop=int(sweep.stop_hz)))
-            if emission.dwell_s > 0:
-                time.sleep(emission.dwell_s)
+            self._enable_output()           # transmit for the dwell
+            self._dwell(emission.dwell_s)
             return
         super().emit(emission)
 
     def _modulate(self, emission) -> None:
         """Park a carrier at the band centre and enable fixed-tone AM/FM.
 
-        Uses the device's internal modulating tone (``tone_hz`` or a default);
-        ``depth`` (AM) and ``deviation_hz`` (FM) fall back to sensible defaults
-        when the session leaves them unset. Serial strings are the (unverified)
-        entries in :data:`_COMMANDS`.
+        Uses the device's internal modulating tone (``tone_hz`` or a default,
+        clamped to the firmware's 100..6000 Hz range); ``depth`` (AM) and
+        ``deviation_hz`` (FM) fall back to defaults when unset. Realised with the
+        firmware ``modulation`` command (see :data:`_COMMANDS`).
         """
         center = (int(emission.start_hz) + int(emission.stop_hz)) // 2
+        self._disable_output()              # configure with the radio quiet
+        self._ensure_stage(center)
         if emission.power_dbm is not None:
             self._set_level(emission.power_dbm)
-        self._send(_COMMANDS["cw"].format(freq=center))
+        self._send(_COMMANDS["cw"].format(freq=center))  # park the carrier
         tone = int(emission.tone_hz) if emission.tone_hz else _DEFAULT_TONE_HZ
+        tone = max(_MOD_HZ_MIN, min(_MOD_HZ_MAX, tone))
+        self._send(_COMMANDS["mod_freq"].format(hz=tone))
         if emission.modulation == Modulation.AM:
             depth_pct = (int(round(emission.depth * 100)) if emission.depth is not None
                          else _DEFAULT_AM_DEPTH_PCT)
-            self._send(_COMMANDS["am"].format(tone=tone, depth=depth_pct))
+            self._send(_COMMANDS["mod_depth"].format(value=depth_pct))
+            self._send(_COMMANDS["mod_am"])
         else:  # FM
             deviation = (int(emission.deviation_hz) if emission.deviation_hz
                          else _DEFAULT_FM_DEVIATION_HZ)
-            self._send(_COMMANDS["fm"].format(tone=tone, deviation=deviation))
-        if emission.dwell_s > 0:
-            time.sleep(emission.dwell_s)
+            deviation = max(_MOD_HZ_MIN, min(_MOD_HZ_MAX, deviation))
+            self._send(_COMMANDS["mod_deviation"].format(hz=deviation))
+            self._send(_COMMANDS["mod_fm"])
+        self._mod_on = True
+        self._enable_output()               # transmit for the dwell
+        self._dwell(emission.dwell_s)
 
     def broadcast(self, start_hz: int, stop_hz: int, dwell_s: float,
                   power_dbm: Optional[float] = None) -> None:
+        center = (int(start_hz) + int(stop_hz)) // 2
+        self._disable_output()              # configure with the radio quiet
+        self._ensure_stage(center)
+        self._clear_modulation()
         if power_dbm is not None:
             self._set_level(power_dbm)
-        if self.mode == "cw":
-            center = (int(start_hz) + int(stop_hz)) // 2
+        if self.mode == "hold":
+            # Park a single carrier at the band centre for the dwell.
             self._send(_COMMANDS["cw"].format(freq=center))
         else:
+            # sweep: one pass over the dwell; chirp: fast repeated passes.
+            sweeptime = self.chirp_time if self.mode == "chirp" else dwell_s
+            self._set_sweeptime(sweeptime)  # set duration while idle...
             self._send(_COMMANDS["sweep"].format(start=int(start_hz), stop=int(stop_hz)))
-        if dwell_s > 0:
-            time.sleep(dwell_s)
+        self._enable_output()               # ...then transmit for the dwell
+        self._dwell(dwell_s)

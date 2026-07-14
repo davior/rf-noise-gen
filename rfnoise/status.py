@@ -26,6 +26,7 @@ class HopStatus:
     dwell_s: float
     elapsed_s: float
     traversal: str = "random_hop"   # tuning mode driving the hop sequence
+    modulation: str = "none"        # carrier modulation (none/am/fm)
 
     @property
     def center_hz(self) -> int:
@@ -43,9 +44,11 @@ class HopStatus:
         rate = completed / self.elapsed_s if self.elapsed_s > 0 else 0.0
         # Compact glyph for the tuning mode: sweep-in-band, sequential, or hop.
         mode = {"sequential": "↑", "sweep_in_band": "↔"}.get(self.traversal, "⟳")
+        # Show modulation only when active, to keep the plain-run line uncluttered.
+        mod = "" if self.modulation in ("none", "") else f"  [{self.modulation}]"
         return (
             f"{mode} {format_freq(self.center_hz):>10}  "
-            f"band {format_freq(self.start_hz)}-{format_freq(self.stop_hz)}  "
+            f"band {format_freq(self.start_hz)}-{format_freq(self.stop_hz)}{mod}  "
             f"{power:>10}  hop {self.index}  "
             f"{_fmt_clock(self.elapsed_s)}  {rate:.1f} hop/s"
         )

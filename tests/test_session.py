@@ -24,6 +24,25 @@ def _sample_session():
     )
 
 
+def test_bundled_sample_session_loads_and_runs():
+    # Invariant 4: the checked-in v1 example (no modulation keys) still loads
+    # with defaults and runs on the mock with no hardware.
+    from rfnoise.devices.base import Modulation, Traversal
+    from rfnoise.devices.mock import MockDevice
+    from rfnoise.engine import NoiseGenerator
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    session = session_store.load(os.path.join(root, "examples", "sample_session.json"))
+    # New optional fields default cleanly for an old envelope.
+    assert session.modulation is Modulation.NONE
+    assert session.mod_source is None
+    assert session.traversal is Traversal.RANDOM_HOP
+    session.device = "mock"
+    session.dwell_seconds = 0.0
+    hops = NoiseGenerator(MockDevice(sleep=False), session).run(iterations=3)
+    assert hops == 3
+
+
 def test_save_load_round_trip(tmp_path):
     session = _sample_session()
     path = os.path.join(tmp_path, "s.json")

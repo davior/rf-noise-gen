@@ -246,6 +246,15 @@ class RFDevice(ABC):
     def _on_close(self) -> None:  # pragma: no cover - trivial default
         pass
 
+    def keep_alive(self) -> None:  # pragma: no cover - trivial default
+        """Service the device while the engine is paused (not emitting).
+
+        The engine calls this periodically during a periodic pause. The default
+        is a no-op; devices that keep streaming between hops (e.g. the tinySA's
+        running sweep) override it to drain their port so a long pause can't
+        overflow the input buffer and stall the next write.
+        """
+
     def emit(self, emission: "Emission") -> None:
         """Emit one :class:`Emission`; the engine's single per-hop entry point.
 
@@ -292,10 +301,20 @@ class RFDevice(ABC):
         else:
             power = "not adjustable"
         tx = "transmit" if caps.can_transmit else "RECEIVE ONLY"
+        mods = sorted(m.value for m in caps.supported_modulations if m != Modulation.NONE)
+        if mods:
+            ibw = ("" if caps.instantaneous_bw_hz is None
+                   else f", up to {format_freq(caps.instantaneous_bw_hz)} IQ")
+            modulation = f"{', '.join(mods).upper()} ({caps.modulation_fidelity}{ibw})"
+        else:
+            modulation = "none"
+        traversals = ", ".join(sorted(t.value for t in caps.supported_traversals))
         return (
             f"{caps.name} [{tx}]\n"
             f"  frequency range : {rng}\n"
             f"  max broadcast bw: {bw}\n"
             f"  output level    : {power}\n"
+            f"  modulation      : {modulation}\n"
+            f"  traversals      : {traversals}\n"
             f"  {caps.description}"
         )

@@ -148,15 +148,18 @@ def test_tinysa_realises_sweep_with_one_native_command():
     dev._serial = _FakeSerial()
     spec = SweepSpec(100_000_000, 105_000_000, steps=5, duration_s=0.0)
     dev.emit(Emission(100_000_000, 105_000_000, dwell_s=0.0, sweep=spec))
-    # Exactly one command (not five step retunes), spanning the whole coverage band.
-    assert len(dev._serial.writes) == 1
-    cmd = dev._serial.writes[0]
-    assert b"100000000" in cmd and b"105000000" in cmd
-    assert cmd.startswith(b"sweep ")
+    # Exactly one *sweep* command (not five step retunes), spanning the whole
+    # coverage band -- alongside output-path/output-on setup commands.
+    sweeps = [w for w in dev._serial.writes if w.startswith(b"sweep ")]
+    assert len(sweeps) == 1
+    assert b"100000000" in sweeps[0] and b"105000000" in sweeps[0]
 
 
 def test_tinysa_plain_emission_falls_back_to_broadcast():
     dev = TinySAUltra(port="/dev/null", mode="sweep")
     dev._serial = _FakeSerial()
     dev.emit(Emission(100_000_000, 100_100_000, dwell_s=0.0))   # no sweep
-    assert len(dev._serial.writes) == 1
+    # Plain emission sweeps the slice once (no step retunes).
+    sweeps = [w for w in dev._serial.writes if w.startswith(b"sweep ")]
+    assert len(sweeps) == 1
+    assert b"100000000" in sweeps[0] and b"100100000" in sweeps[0]

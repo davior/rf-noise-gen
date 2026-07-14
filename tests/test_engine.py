@@ -143,6 +143,22 @@ def test_pause_every_hops_still_completes_iterations():
     assert len(device.history) == 6
 
 
+def test_pause_services_device_keep_alive():
+    # The engine must service the device through a pause so a streaming device
+    # (e.g. tinySA sweep) can't overflow its buffer while paused.
+    session = _mock_session(dwell_seconds=0.0, pause_seconds=0.05, pause_every_hops=2)
+
+    class _CountingMock(MockDevice):
+        keep_alive_calls = 0
+
+        def keep_alive(self):
+            type(self).keep_alive_calls += 1
+
+    device = _CountingMock(verbose=False, sleep=False)
+    NoiseGenerator(device, session).run(iterations=4)
+    assert _CountingMock.keep_alive_calls > 0
+
+
 def test_pause_adds_wall_clock_time():
     # 4 hops with a pause every 2 hops -> one pause fires (after hop 2; the
     # pause after hop 4 is skipped as the final requested hop). ~0.1s minimum.

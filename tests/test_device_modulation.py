@@ -119,9 +119,11 @@ def test_tinysa_am_parks_carrier_then_enables_am():
         modulation=Modulation.AM, source=ModSource.TONE,
         depth=0.5, tone_hz=1_000.0,
     ))
-    # Carrier parked at the band centre, then AM at 1 kHz / 50% depth.
+    # Carrier parked at the band centre, tone set, depth set, then AM enabled.
     assert any("sweep 100100000 100100000" in w for w in writes)
-    assert any("am 1000 50" in w for w in writes)
+    assert any("modulation freq 1000" in w for w in writes)
+    assert any("modulation depth 50" in w for w in writes)
+    assert any("modulation am" in w for w in writes)
 
 
 def test_tinysa_fm_issues_fm_command_with_deviation():
@@ -129,9 +131,21 @@ def test_tinysa_fm_issues_fm_command_with_deviation():
     writes = _emit(dev, Emission(
         start_hz=100_000_000, stop_hz=100_200_000, dwell_s=0.0,
         modulation=Modulation.FM, source=ModSource.TONE,
-        deviation_hz=8_000.0, tone_hz=2_000.0,
+        deviation_hz=5_000.0, tone_hz=2_000.0,
     ))
-    assert any("fm 2000 8000" in w for w in writes)
+    assert any("modulation freq 2000" in w for w in writes)
+    assert any("modulation deviation 5000" in w for w in writes)
+    assert any("modulation fm" in w for w in writes)
+
+
+def test_tinysa_fm_deviation_clamped_to_firmware_range():
+    dev = TinySAUltra(port="/dev/null", mode="cw")
+    writes = _emit(dev, Emission(
+        start_hz=100_000_000, stop_hz=100_200_000, dwell_s=0.0,
+        modulation=Modulation.FM, source=ModSource.TONE,
+        deviation_hz=50_000.0,           # above the 6 kHz firmware max
+    ))
+    assert any("modulation deviation 6000" in w for w in writes)
 
 
 def test_tinysa_modulation_uses_defaults_when_unset():
@@ -140,7 +154,9 @@ def test_tinysa_modulation_uses_defaults_when_unset():
         start_hz=100_000_000, stop_hz=100_200_000, dwell_s=0.0,
         modulation=Modulation.AM, source=ModSource.TONE,
     ))
-    assert any("am 1000 50" in w for w in writes)  # default tone + depth
+    assert any("modulation freq 1000" in w for w in writes)   # default tone
+    assert any("modulation depth 50" in w for w in writes)    # default depth
+    assert any("modulation am" in w for w in writes)
 
 
 def test_tinysa_plain_emission_still_sweeps():
@@ -149,4 +165,22 @@ def test_tinysa_plain_emission_still_sweeps():
         start_hz=100_000_000, stop_hz=100_200_000, dwell_s=0.0,
     ))
     assert any("sweep 100000000 100200000" in w for w in writes)
-    assert not any(w.startswith("am") or w.startswith("fm") for w in writes)
+    assert not any("modulation am" in w or "modulation fm" in w for w in writes)
+
+
+def test_tinysa_enters_generator_mode_and_selects_output_path():
+    # A run must switch the device into output mode and pick a path by frequency.
+    dev = TinySAUltra(port="/dev/ttyACM0", mode="sweep")
+
+    class _RecordingSerial(_FakeSerial):
+        pass
+
+    dev._open_serial = lambda port: _RecordingSerial()
+    dev.open()
+    dev.broadcast(400_000_000, 500_000_000, 0.0)   # <= 800 MHz -> normal path
+    dev.broadcast(900_000_000, 1_000_000_000, 0.0)  # > 800 MHz -> mixer path
+    writes = [w.decode() if isinstance(w, bytes) else w for w in dev._serial.writes]
+    joined = "\n".join(writes)
+    assert "mode output" in joined
+    assert "output normal" in joined
+    assert "output mixer" in joined
