@@ -188,3 +188,66 @@ def test_power_range_ignored_when_device_cannot_control(capsys):
     assert "cannot set output level" in out
     gen.run(iterations=3)
     assert all(rec.power_dbm is None for rec in device.history)
+
+
+# -- band drift -------------------------------------------------------------
+def test_drift_keeps_every_hop_within_range():
+    session = _mock_session(drift_fraction=0.5)
+    device = _mock_device()
+    NoiseGenerator(device, session).run(iterations=200)
+    for rec in device.history:
+        assert rec.start_hz >= 100_000
+        assert rec.stop_hz <= 200_000
+        assert rec.width_hz == 10_000  # drift shifts, never resizes
+
+
+def test_drift_makes_schedule_unpredictable():
+    # Without drift the pool has 10 fixed bands -> at most 10 distinct starts.
+    plain = _mock_device()
+    NoiseGenerator(plain, _mock_session()).run(iterations=200)
+    assert len({rec.start_hz for rec in plain.history}) <= 10
+
+    # With drift, starts spread far beyond the 10-band grid.
+    drifted = _mock_device()
+    NoiseGenerator(drifted, _mock_session(drift_fraction=0.5)).run(iterations=200)
+    assert len({rec.start_hz for rec in drifted.history}) > 10
+
+
+def test_drift_is_reproducible_with_seed():
+    def run_once():
+        device = _mock_device()
+        NoiseGenerator(device, _mock_session(drift_fraction=0.5, seed=99)).run(iterations=20)
+        return [(rec.start_hz, rec.stop_hz) for rec in device.history]
+    assert run_once() == run_once()
+
+
+def test_drift_off_leaves_bands_on_the_grid():
+    device = _mock_device()
+    NoiseGenerator(device, _mock_session(drift_fraction=None)).run(iterations=50)
+    # Every band lands exactly on a 10 kHz boundary of the 100k-200k range.
+    for rec in device.history:
+        assert (rec.start_hz - 100_000) % 10_000 == 0
+
+
+def test_drift_off_does_not_perturb_rng_stream():
+    # drift_fraction None and 0.0 both disable drift and must draw no extra
+    # random numbers, so band + power streams are byte-identical.
+    def run_once(drift):
+        device = MockDevice(verbose=False, sleep=False)
+        NoiseGenerator(
+            device,
+            _mock_session(power_min_dbm=-60.0, power_max_dbm=-30.0,
+                          drift_fraction=drift, seed=123),
+        ).run(iterations=25)
+        return [(r.start_hz, r.stop_hz, r.power_dbm) for r in device.history]
+    assert run_once(None) == run_once(0.0)
+
+
+def test_dry_run_plan_reflects_drift():
+    # Same seed -> identical drifted plan; drift changes the plan vs no drift.
+    drifted = NoiseGenerator(_mock_device(), _mock_session(drift_fraction=0.5, seed=3)).plan(10)
+    drifted2 = NoiseGenerator(_mock_device(), _mock_session(drift_fraction=0.5, seed=3)).plan(10)
+    plain = NoiseGenerator(_mock_device(), _mock_session(seed=3)).plan(10)
+    assert drifted == drifted2
+    assert drifted != plain
+    assert all(100_000 <= b.start_hz and b.stop_hz <= 200_000 for b in drifted)

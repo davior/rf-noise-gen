@@ -7,7 +7,7 @@ import random
 import time
 from typing import Callable, List, Optional
 
-from .bands import Band, build_bands, build_coverage_bands
+from .bands import Band, build_bands, build_coverage_bands, drift_offset
 from .devices.base import (
     Emission,
     Modulation,
@@ -172,6 +172,22 @@ class NoiseGenerator:
         return SweepSpec(start_hz=band.start_hz, stop_hz=band.stop_hz,
                          steps=steps, duration_s=dwell, mode="stepped")
 
+    def _drifted(self, band: Band) -> Band:
+        """Return ``band`` shifted by a random per-hop drift, or unchanged.
+
+        When drift is disabled no random number is drawn, so seeded runs without
+        drift keep the exact RNG stream (and results) they had before. Otherwise
+        the offset is drawn from the shared RNG and clamped to keep the band
+        inside its parent range (see :func:`rfnoise.bands.drift_offset`).
+        """
+        if not self.session.has_drift:
+            return band
+        delta = drift_offset(band, self.session.drift_fraction, self.rng)
+        if delta == 0:
+            return band
+        return Band(band.start_hz + delta, band.stop_hz + delta,
+                    band.range_lower_hz, band.range_upper_hz)
+
     def stop(self) -> None:
         self._stopped = True
 
@@ -194,8 +210,12 @@ class NoiseGenerator:
             time.sleep(min(left, 0.1))
 
     def plan(self, iterations: int) -> List[Band]:
-        """Return the next ``iterations`` bands without transmitting (dry-run)."""
-        return [self.selector.next() for _ in range(iterations)]
+        """Return the next ``iterations`` bands without transmitting (dry-run).
+
+        Drift (when enabled) is applied here too, so the preview reflects the
+        randomised bands that would actually be broadcast.
+        """
+        return [self._drifted(self.selector.next()) for _ in range(iterations)]
 
     def run(self, duration: Optional[float] = None,
             iterations: Optional[int] = None,
@@ -221,6 +241,7 @@ class NoiseGenerator:
                     break
                 band = self.selector.next()
                 power = self._next_power()
+                band = self._drifted(band)
                 dwell = self.session.dwell_seconds
                 if deadline is not None:
                     dwell = max(0.0, min(dwell, deadline - time.monotonic()))

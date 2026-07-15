@@ -1,8 +1,12 @@
+import random
+
 import pytest
 
 from rfnoise.bands import (
+    Band,
     RandomBandSelector,
     build_bands,
+    drift_offset,
     effective_bandwidth,
     split_range,
 )
@@ -73,3 +77,75 @@ def test_random_selector_is_seeded():
 def test_random_selector_empty_pool():
     with pytest.raises(ValueError):
         RandomBandSelector([])
+
+
+# -- band drift -------------------------------------------------------------
+def test_split_range_records_parent_range():
+    rng = FrequencyRange(100, 200, 10)
+    bands = split_range(rng, 10)
+    assert all(b.range_lower_hz == 100 and b.range_upper_hz == 200 for b in bands)
+
+
+def test_drift_offset_interior_uses_full_reach():
+    # [110,120] inside [100,200], reach = 0.5 * 10 = 5 -> delta in [-5, 5].
+    band = Band(110, 120, 100, 200)
+    r = random.Random(0)
+    offs = [drift_offset(band, 0.5, r) for _ in range(2000)]
+    assert all(-5 <= d <= 5 for d in offs)
+    assert min(offs) <= -4 and max(offs) >= 4  # spans both directions
+
+
+def test_drift_offset_low_edge_only_drifts_inward():
+    # [100,110] touches the range floor -> can only move up: delta in [0, 5].
+    band = Band(100, 110, 100, 200)
+    r = random.Random(0)
+    offs = [drift_offset(band, 0.5, r) for _ in range(2000)]
+    assert all(0 <= d <= 5 for d in offs)
+
+
+def test_drift_offset_high_edge_only_drifts_inward():
+    # [190,200] touches the range ceiling -> can only move down: delta in [-5, 0].
+    band = Band(190, 200, 100, 200)
+    r = random.Random(0)
+    offs = [drift_offset(band, 0.5, r) for _ in range(2000)]
+    assert all(-5 <= d <= 0 for d in offs)
+
+
+def test_drift_offset_never_leaves_range():
+    rng = FrequencyRange(100, 200, 10)
+    bands = split_range(rng, 10)
+    r = random.Random(1)
+    for band in bands:
+        for _ in range(200):
+            d = drift_offset(band, 0.5, r)
+            assert band.start_hz + d >= 100
+            assert band.stop_hz + d <= 200
+
+
+def test_drift_offset_zero_fraction_is_off():
+    band = Band(110, 120, 100, 200)
+    r = random.Random(0)
+    assert all(drift_offset(band, 0.0, r) == 0 for _ in range(50))
+
+
+def test_drift_offset_band_filling_range_cannot_move():
+    band = Band(100, 200, 100, 200)  # fills its whole range
+    r = random.Random(0)
+    assert all(drift_offset(band, 0.5, r) == 0 for _ in range(50))
+
+
+def test_drift_offset_without_range_bounds_uses_reach_only():
+    band = Band(0, 100)  # no parent range -> only the +/- reach cap applies
+    r = random.Random(0)
+    offs = [drift_offset(band, 0.5, r) for _ in range(2000)]
+    assert all(-50 <= d <= 50 for d in offs)
+    assert min(offs) <= -45 and max(offs) >= 45
+
+
+def test_drift_offset_reproducible_with_seeded_rng():
+    band = Band(110, 120, 100, 200)
+    a = [drift_offset(band, 0.5, random.Random(0)) for _ in range(1)]
+    b = [drift_offset(band, 0.5, random.Random(0)) for _ in range(1)]
+    seq_a = [drift_offset(band, 0.5, r) for r in [random.Random(5)] for _ in range(10)]
+    seq_b = [drift_offset(band, 0.5, r) for r in [random.Random(5)] for _ in range(10)]
+    assert a == b and seq_a == seq_b

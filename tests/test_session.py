@@ -71,6 +71,39 @@ def test_power_range_rejects_inverted():
         Session(power_min_dbm=-20.0, power_max_dbm=-60.0)
 
 
+def test_drift_round_trip(tmp_path):
+    session = _sample_session()
+    session.drift_fraction = 0.5
+    path = os.path.join(tmp_path, "drift.json")
+    session_store.save(session, path)
+    loaded = session_store.load(path)
+    assert loaded.drift_fraction == 0.5
+    assert loaded.has_drift
+    assert loaded.to_dict() == session.to_dict()
+
+
+def test_drift_defaults_none():
+    s = Session()
+    assert s.drift_fraction is None and not s.has_drift
+
+
+def test_drift_rejects_negative():
+    with pytest.raises(ValueError):
+        Session(drift_fraction=-0.1)
+
+
+def test_load_old_session_without_drift(tmp_path):
+    # A payload predating the field still loads (drift stays off).
+    import json
+    data = _sample_session().to_dict()
+    data.pop("drift_fraction", None)
+    path = os.path.join(tmp_path, "legacy.json")
+    with open(path, "w") as fh:
+        json.dump({"schema_version": 1, "session": data}, fh)
+    loaded = session_store.load(path)
+    assert loaded.drift_fraction is None and not loaded.has_drift
+
+
 def test_load_bare_dict(tmp_path):
     import json
     path = os.path.join(tmp_path, "bare.json")

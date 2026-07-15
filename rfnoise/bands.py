@@ -8,6 +8,7 @@ importable from here for backwards compatibility (see :func:`__getattr__`).
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence
 
@@ -16,10 +17,18 @@ from .model import FrequencyRange
 
 @dataclass(frozen=True)
 class Band:
-    """A concrete slice the device will broadcast on."""
+    """A concrete slice the device will broadcast on.
+
+    ``range_lower_hz``/``range_upper_hz`` remember the bounds of the parent
+    :class:`~rfnoise.model.FrequencyRange` the band was cut from. They are
+    optional (``None`` when a band is built in isolation, e.g. in tests) and are
+    used to keep per-hop drift from pushing an emission outside its range.
+    """
 
     start_hz: int
     stop_hz: int
+    range_lower_hz: Optional[int] = None
+    range_upper_hz: Optional[int] = None
 
     @property
     def width_hz(self) -> int:
@@ -50,7 +59,7 @@ def split_range(rng: FrequencyRange, effective_bw: int, overlap: float = 0.0) ->
     start = rng.lower_hz
     while start < rng.upper_hz:
         stop = min(start + width, rng.upper_hz)
-        bands.append(Band(start, stop))
+        bands.append(Band(start, stop, rng.lower_hz, rng.upper_hz))
         if stop >= rng.upper_hz:
             break
         start += step
@@ -96,6 +105,33 @@ def coverage_bandwidth(rng: FrequencyRange) -> int:
     if rng.max_bandwidth_hz is not None:
         return max(1, min(rng.max_bandwidth_hz, rng.width_hz))
     return rng.width_hz
+
+
+def drift_offset(band: Band, fraction: float, rand: random.Random) -> int:
+    """Random frequency offset (Hz) to shift ``band`` by on a single hop.
+
+    The offset is drawn uniformly from ``[-reach, +reach]`` where
+    ``reach = fraction * band.width_hz``, then clamped so the shifted band stays
+    fully inside its parent range: it can never move ``start`` below
+    ``range_lower_hz`` nor ``stop`` above ``range_upper_hz``. Interior bands get
+    the full ``±reach``; bands touching a range edge drift only inward; a band
+    that already fills its range cannot move. Returns ``0`` when ``fraction`` is
+    non-positive, the band has no width, or the clamped interval is empty.
+
+    When the parent-range bounds are ``None`` (a band built in isolation), only
+    the ``±reach`` cap applies.
+    """
+    if fraction <= 0 or band.width_hz <= 0:
+        return 0
+    reach = fraction * band.width_hz
+    lo, hi = -reach, reach
+    if band.range_lower_hz is not None:
+        lo = max(lo, band.range_lower_hz - band.start_hz)
+    if band.range_upper_hz is not None:
+        hi = min(hi, band.range_upper_hz - band.stop_hz)
+    if hi <= lo:
+        return 0
+    return int(round(rand.uniform(lo, hi)))
 
 
 def build_coverage_bands(ranges: Sequence[FrequencyRange],

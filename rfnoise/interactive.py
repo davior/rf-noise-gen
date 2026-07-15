@@ -184,6 +184,24 @@ def _edit_power(session: Session) -> None:
         print("  ! enter numbers for both bounds (leaving strength unchanged)")
 
 
+def _edit_drift(session: Session) -> None:
+    print("  band drift (fraction of bandwidth; 0 = off; 0.5 = +/- bw/2)")
+    raw = _prompt("  drift fraction",
+                  "" if session.drift_fraction is None else f"{session.drift_fraction:g}")
+    if not raw.strip():
+        session.drift_fraction = None
+        return
+    try:
+        value = float(raw)
+    except ValueError:
+        print("  ! enter a number (leaving drift unchanged)")
+        return
+    if value < 0:
+        print("  ! drift fraction must be non-negative (leaving drift unchanged)")
+        return
+    session.drift_fraction = value or None
+
+
 def _run_session(session: Session) -> None:
     opts = dict(session.device_options)
     if session.device == "mock":
@@ -220,10 +238,11 @@ def _summary(session: Session) -> str:
     pause = ""
     if session.has_pause:
         pause = f"  pause={session.pause_seconds:g}s/{session.pause_every_hops}hops"
+    drift = f"  drift=+/-{session.drift_fraction:g}*bw" if session.has_drift else ""
     return (
         f"name={session.name}  device={session.device}  "
         f"mode={session.traversal.value}  "
-        f"ranges={len(session.ranges)}  dwell={session.dwell_seconds}s{pause}{power}"
+        f"ranges={len(session.ranges)}  dwell={session.dwell_seconds}s{pause}{power}{drift}"
     )
 
 
@@ -251,6 +270,7 @@ def run_interactive(session: Optional[Session] = None) -> None:
             _edit_traversal(session)
             _edit_pause(session)
             _edit_power(session)
+            _edit_drift(session)
         elif choice == "5":
             path = session_store.default_path_for(session.name)
             path = _prompt("save to", path)

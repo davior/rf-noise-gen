@@ -104,6 +104,9 @@ SETTING_TIPS: Dict[str, str] = {
                    "blank to let the device use its default power.",
     "f_power_max": "Upper bound of the transmit strength range, in dBm. Leave "
                    "blank to let the device use its default power.",
+    "f_drift": "Randomly shift each band when it fires, by up to this fraction "
+               "of its bandwidth (0.5 = +/- half a band). Stays inside the "
+               "defined ranges. Blank or 0 = off.",
     "f_device": "Which signal device drives the output. The options below "
                 "change to match the selected device.",
     "f_decay_window": "How long each plotted hop stays visible on the live "
@@ -186,6 +189,10 @@ def collect_session(values: Dict[str, Any], rows: List[Dict[str, str]],
     if pmin is not None and pmax is not None and pmax < pmin:
         pmin, pmax = pmax, pmin
 
+    drift = _parse_optional_float(values.get("drift", ""))
+    if drift is not None and drift < 0:
+        raise ValueError("drift must be non-negative (fraction of bandwidth)")
+
     return Session(
         name=(values.get("name") or "untitled").strip() or "untitled",
         device=device,
@@ -199,6 +206,7 @@ def collect_session(values: Dict[str, Any], rows: List[Dict[str, str]],
         pause_every_hops=int(values.get("pause_every", 0) or 0),
         power_min_dbm=pmin,
         power_max_dbm=pmax,
+        drift_fraction=drift or None,
     )
 
 
@@ -214,6 +222,7 @@ def session_to_form(session: Session) -> Tuple[Dict[str, Any], List[Dict[str, st
         "pause_every": session.pause_every_hops,
         "power_min": "" if session.power_min_dbm is None else f"{session.power_min_dbm:g}",
         "power_max": "" if session.power_max_dbm is None else f"{session.power_max_dbm:g}",
+        "drift": "" if session.drift_fraction is None else f"{session.drift_fraction:g}",
     }
     rows = [
         {
@@ -612,6 +621,7 @@ def run_gui(session: Optional[Session] = None) -> None:
             "pause_every": dpg.get_value("f_pause_every"),
             "power_min": dpg.get_value("f_power_min"),
             "power_max": dpg.get_value("f_power_max"),
+            "drift": dpg.get_value("f_drift"),
         }
         rows = []
         for row_id in state["row_ids"]:
@@ -702,6 +712,7 @@ def run_gui(session: Optional[Session] = None) -> None:
         dpg.set_value("f_pause_every", int(values["pause_every"]))
         dpg.set_value("f_power_min", values["power_min"])
         dpg.set_value("f_power_max", values["power_max"])
+        dpg.set_value("f_drift", values["drift"])
         state["device"] = sess.device
         dpg.set_value("f_device", sess.device)
         rebuild_device_options(sess.device_options)
@@ -908,6 +919,11 @@ def run_gui(session: Optional[Session] = None) -> None:
                                        default_value=_initial_values["power_max"],
                                        width=90)
                     add_tip("f_power_max", SETTING_TIPS["f_power_max"])
+                dpg.add_input_text(label="drift (fraction of bw, blank=off)",
+                                   tag="f_drift",
+                                   default_value=_initial_values["drift"],
+                                   width=90)
+                add_tip("f_drift", SETTING_TIPS["f_drift"])
 
                 dpg.add_separator()
                 dpg.add_text("Device")

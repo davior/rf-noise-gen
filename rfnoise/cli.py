@@ -75,6 +75,8 @@ def _cmd_run(args) -> int:
         session.pause_seconds = args.pause_seconds
     if args.pause_every is not None:
         session.pause_every_hops = args.pause_every
+    if args.drift is not None:
+        session.drift_fraction = args.drift
     opts = dict(session.device_options)
     if session.device == "mock":
         opts.setdefault("sleep", not args.dry_run)
@@ -87,7 +89,9 @@ def _cmd_run(args) -> int:
 
     if args.dry_run:
         n = args.iterations or 10
-        print(f"dry run: next {n} hops ({len(gen.bands)} bands in pool)")
+        drift = (f", drift +/-{session.drift_fraction:g}*bw"
+                 if session.has_drift else "")
+        print(f"dry run: next {n} hops ({len(gen.bands)} bands in pool{drift})")
         for i, band in enumerate(gen.plan(n)):
             print(f"  {i:>3}: {format_freq(band.center_hz):>10} "
                   f"({format_freq(band.start_hz)}-{format_freq(band.stop_hz)}, "
@@ -103,8 +107,9 @@ def _cmd_run(args) -> int:
     if session.has_pause:
         pause = (f", pause {session.pause_seconds:g}s every "
                  f"{session.pause_every_hops} hops")
+    drift = f", drift +/-{session.drift_fraction:g}*bw" if session.has_drift else ""
     print(f"running '{session.name}' on {device.name} [{session.traversal.value}]: "
-          f"{len(gen.bands)} bands, dwell {session.dwell_seconds}s{power}{pause}")
+          f"{len(gen.bands)} bands, dwell {session.dwell_seconds}s{power}{pause}{drift}")
     reporter.start()
     import time as _time
     t0 = _time.monotonic()
@@ -142,6 +147,9 @@ def build_parser() -> argparse.ArgumentParser:
                        choices=["random_hop", "sequential", "sweep_in_band"],
                        help="override tuning mode: random-hop, sequential sweep, "
                             "or sweep-within-band")
+    p_run.add_argument("--drift", type=float, metavar="FRACTION",
+                       help="override band drift as a fraction of bandwidth "
+                            "(0 disables; 0.5 = +/- bandwidth/2)")
     p_run.add_argument("--duration", type=float, help="seconds to run")
     p_run.add_argument("--iterations", type=int, help="number of hops")
     p_run.add_argument("--pause-seconds", type=float,
