@@ -21,6 +21,9 @@ several RF devices through a common abstraction layer.
   optional periodic pause (hold transmission for X seconds every N hops).
 - **Random broadcast strength.** Optionally give a dBm range and each hop
   transmits at a random level drawn from it (see below).
+- **Random band drift.** Optionally shift every band by a random amount when it
+  fires (a fraction of its bandwidth), making the emission schedule far harder to
+  predict while never straying outside the ranges you defined (see below).
 - **Live run status.** While running, a status line shows the current frequency,
   band, output level, hop count and rate.
 - **Pluggable device abstraction**: tinySA Ultra, HackRF One, RTL-SDR, plus a
@@ -83,6 +86,33 @@ Override a saved session at run time with the `run` flags:
 
 ```
 rfnoise run session.json --pause-every 10 --pause-seconds 2
+```
+
+## Random band drift
+
+Normally every hop broadcasts on the exact boundaries of one of the fixed bands,
+so an observer who learns your range/bandwidth layout knows precisely which
+slices can ever go out. Set a `drift_fraction` on a session to make that
+unpredictable: when a band fires it is shifted by a random offset up to
+`± drift_fraction × bandwidth`, drawn from the same seeded RNG as everything else
+(so seeded runs stay reproducible). `0.5` gives the classic **± bandwidth/2**
+spread — a nominal 110–120 MHz band then goes out as anything from 105–115 up to
+115–125 MHz.
+
+The drift is **clamped to the band's parent range**: an offset can never push a
+band past the `lower`/`upper` bounds it was cut from, so interior bands drift the
+full `± reach` while bands touching a range edge drift only inward. A band that
+already fills its whole range cannot move. Because drift only shifts the band
+(preserving its width), it works for every emit mode automatically — the tinySA
+sweep span or CW tone slides, and the HackRF centre retunes while its
+instantaneous bandwidth is unchanged.
+
+Leave `drift_fraction` blank / `None` / `0` to disable it (the default). The
+`run` command also takes a `--drift FRACTION` override for quick experiments:
+
+```bash
+rfnoise run session.json --drift 0.5    # ± bandwidth/2 drift
+rfnoise run session.json --drift 0      # force drift off
 ```
 
 ## Live run status
@@ -260,6 +290,7 @@ session = Session(
     dwell_seconds=0.25,
     power_min_dbm=-60, power_max_dbm=-30,              # random strength per hop
     pause_seconds=2, pause_every_hops=10,             # pause 2s every 10 hops
+    drift_fraction=0.5,                                # random +/- bw/2 band drift
     seed=42,
 )
 gen = NoiseGenerator(create_device("mock"), session)
@@ -273,11 +304,11 @@ rfnoise/
   devices/       device abstraction + drivers (base, mock, tinysa, hackrf, rtlsdr)
   freq.py        human-friendly frequency parse/format
   model.py       FrequencyRange, Session
-  bands.py       band splitting + coverage bands
+  bands.py       band splitting + coverage bands + drift offset
   tuning.py      tuning strategies (random-hop, sequential, sweep-in-band)
   modulation.py  AM/FM/chirp DSP core (numpy, optional [dsp] extra)
   sources.py     modulating sources (tone/noise) for AM/FM
-  engine.py      NoiseGenerator: validation + hop/dwell loop + power draws
+  engine.py      NoiseGenerator: validation + hop/dwell loop + power/drift draws
   status.py      live/log run-status reporters (HopStatus)
   session.py     versioned JSON load/save
   interactive.py menu-driven session editor

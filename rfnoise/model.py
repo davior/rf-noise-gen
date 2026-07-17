@@ -98,6 +98,11 @@ class Session:
     # broadcasts at a random level drawn uniformly from [min, max].
     power_min_dbm: Optional[float] = None
     power_max_dbm: Optional[float] = None
+    # Optional per-hop frequency drift, as a fraction of each band's bandwidth.
+    # When set (> 0), every broadcast band is shifted by a random offset up to
+    # +/- drift_fraction * bandwidth, clamped to stay inside its parent range.
+    # ``None`` or 0 disables drift. 0.5 gives the +/- bandwidth/2 spread.
+    drift_fraction: Optional[float] = None
 
     def __post_init__(self) -> None:
         # Accept a plain string (e.g. from a session file or CLI flag) as well
@@ -130,6 +135,8 @@ class Session:
             raise ValueError("pause_seconds must be >= 0")
         if self.pause_every_hops < 0:
             raise ValueError("pause_every_hops must be >= 0")
+        if self.drift_fraction is not None and self.drift_fraction < 0:
+            raise ValueError("drift_fraction must be non-negative")
 
     @property
     def has_power_range(self) -> bool:
@@ -142,6 +149,10 @@ class Session:
     @property
     def has_modulation(self) -> bool:
         return self.modulation != Modulation.NONE
+
+    @property
+    def has_drift(self) -> bool:
+        return self.drift_fraction is not None and self.drift_fraction > 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -162,6 +173,7 @@ class Session:
             "pause_every_hops": self.pause_every_hops,
             "power_min_dbm": self.power_min_dbm,
             "power_max_dbm": self.power_max_dbm,
+            "drift_fraction": self.drift_fraction,
         }
 
     @classmethod
@@ -184,4 +196,5 @@ class Session:
             pause_every_hops=int(data.get("pause_every_hops", 0)),
             power_min_dbm=data.get("power_min_dbm"),
             power_max_dbm=data.get("power_max_dbm"),
+            drift_fraction=data.get("drift_fraction"),
         )

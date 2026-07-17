@@ -35,6 +35,7 @@ def _sample_session():
         pause_every_hops=8,
         power_min_dbm=-40.0,
         power_max_dbm=-10.0,
+        drift_fraction=0.5,
     )
 
 
@@ -51,6 +52,7 @@ def test_session_form_round_trip():
     assert rebuilt.pause_every_hops == original.pause_every_hops
     assert rebuilt.power_min_dbm == original.power_min_dbm
     assert rebuilt.power_max_dbm == original.power_max_dbm
+    assert rebuilt.drift_fraction == original.drift_fraction
     assert len(rebuilt.ranges) == 2
     assert rebuilt.ranges[0].lower_hz == 100_000
     assert rebuilt.ranges[0].upper_hz == 200_000
@@ -66,6 +68,28 @@ def test_collect_session_blank_seed_and_power():
     assert sess.seed is None
     assert sess.power_min_dbm is None
     assert sess.power_max_dbm is None
+    assert sess.drift_fraction is None  # missing -> drift off
+
+
+def test_collect_session_blank_drift_is_off():
+    values = {"name": "x", "dwell": 0.5, "overlap": 0.0, "seed": "",
+              "power_min": "", "power_max": "", "drift": ""}
+    sess = gui.collect_session(values, [], "mock", {})
+    assert sess.drift_fraction is None and not sess.has_drift
+
+
+def test_collect_session_parses_drift():
+    values = {"name": "x", "dwell": 0.5, "overlap": 0.0, "seed": "",
+              "power_min": "", "power_max": "", "drift": "0.5"}
+    sess = gui.collect_session(values, [], "mock", {})
+    assert sess.drift_fraction == 0.5
+
+
+def test_collect_session_rejects_negative_drift():
+    values = {"name": "x", "dwell": 0.5, "overlap": 0.0, "seed": "",
+              "power_min": "", "power_max": "", "drift": "-0.2"}
+    with pytest.raises(ValueError):
+        gui.collect_session(values, [], "mock", {})
 
 
 def test_collect_session_partial_power_rejected():
