@@ -127,6 +127,69 @@ broadcast, the band, the output level, hop count, elapsed time and hop rate:
 In a terminal it updates a single line in place; piped/non-TTY output (or
 `--log`) prints one line per hop; `--quiet` suppresses it.
 
+## Download a prebuilt executable
+
+Prefer not to install Python? Every release ships **standalone executables** you
+can download and run directly — no Python, no `pip`. Grab the file for your
+platform from the [Releases](../../releases) page:
+
+| Platform              | Download                     |
+|-----------------------|------------------------------|
+| Linux (x86-64)        | `rfnoise-linux-x86_64.zip`   |
+| Windows (x86-64)      | `rfnoise-windows-x86_64.zip` |
+| macOS (Intel)         | `rfnoise-macos-x86_64.zip`   |
+| macOS (Apple Silicon) | `rfnoise-macos-arm64.zip`    |
+
+Everything is bundled into the one file — the text UI, the graphical editor,
+AM/FM modulation (numpy) and the tinySA serial driver (pyserial).
+
+**Linux / macOS**
+
+```bash
+unzip rfnoise-linux-x86_64.zip
+chmod +x rfnoise                       # first time only
+./rfnoise                              # interactive text editor
+./rfnoise gui                          # graphical editor
+./rfnoise run session.json --duration 5
+```
+
+**Windows** (PowerShell)
+
+```powershell
+Expand-Archive rfnoise-windows-x86_64.zip -DestinationPath .
+.\rfnoise.exe                          # interactive text editor
+.\rfnoise.exe gui                      # graphical editor
+```
+
+Double-clicking the binary opens the **text** editor in a console window; run
+`rfnoise gui` for the graphical one.
+
+**A few notes on the prebuilt binaries:**
+
+- **They are unsigned**, so the OS may warn on first launch. On **macOS**,
+  right-click the binary → **Open** → **Open** (or *System Settings → Privacy &
+  Security → Open Anyway*). On **Windows**, if SmartScreen shows "Windows
+  protected your PC", click **More info** → **Run anyway**.
+- **The GUI needs a graphical desktop** with OpenGL 3.3 — it will not run on a
+  headless server. Use `rfnoise ui` / `rfnoise run` there instead.
+- **HackRF still needs its system tools.** The HackRF driver shells out to
+  `hackrf_transfer`, which is *not* bundled — install the `hackrf` package to
+  use that device. The `mock`, `tinySA` and `RTL-SDR` devices need nothing extra.
+
+### Building the executable yourself
+
+The binaries are produced with [PyInstaller](https://pyinstaller.org) from the
+committed `rfnoise.spec`. To build one for your current OS:
+
+```bash
+pip install ".[gui,dsp,hardware,build]"
+pyinstaller rfnoise.spec
+./dist/rfnoise list-devices
+```
+
+Releases for all four platforms are built automatically by
+`.github/workflows/release.yml` when a `v*` tag is pushed.
+
 ## Install
 
 ```bash
