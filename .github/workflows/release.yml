@@ -27,12 +27,13 @@ jobs:
           - os: windows-latest
             asset: rfnoise-windows-x86_64
             bin: rfnoise.exe
-          - os: macos-13          # Intel
-            asset: rfnoise-macos-x86_64
-            bin: rfnoise
-          - os: macos-14          # Apple Silicon
+          - os: macos-14          # Apple Silicon (arm64)
             asset: rfnoise-macos-arm64
             bin: rfnoise
+          # Note: no Intel (x86_64) macOS build. GitHub's macos-13 Intel
+          # runners are being deprecated and frequently fail to allocate
+          # (jobs sit queued indefinitely), which would block the whole
+          # release. Intel Mac users install via pip instead (see README).
     steps:
       - uses: actions/checkout@v4
 
