@@ -23,6 +23,7 @@ hardware = ["pyserial>=3.5"]
 gui = ["dearpygui>=1.11"]
 dsp = ["numpy>=1.21"]
 dev = ["pytest>=7.0"]
+build = ["pyinstaller>=6.0"]
 
 [project.scripts]
 rfnoise = "rfnoise.cli:main"
