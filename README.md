@@ -133,15 +133,19 @@ Prefer not to install Python? Every release ships **standalone executables** you
 can download and run directly — no Python, no `pip`. Grab the file for your
 platform from the [Releases](../../releases) page:
 
-| Platform              | Download                     |
-|-----------------------|------------------------------|
-| Linux (x86-64)        | `rfnoise-linux-x86_64.zip`   |
-| Windows (x86-64)      | `rfnoise-windows-x86_64.zip` |
-| macOS (Intel)         | `rfnoise-macos-x86_64.zip`   |
-| macOS (Apple Silicon) | `rfnoise-macos-arm64.zip`    |
+| Platform                    | Download                     |
+|-----------------------------|------------------------------|
+| Linux (x86-64)              | `rfnoise-linux-x86_64.zip`   |
+| Windows (x86-64)            | `rfnoise-windows-x86_64.zip` |
+| macOS (Apple Silicon, arm64)| `rfnoise-macos-arm64.zip`    |
 
 Everything is bundled into the one file — the text UI, the graphical editor,
 AM/FM modulation (numpy) and the tinySA serial driver (pyserial).
+
+> **Intel Macs (pre-2020):** there is no prebuilt Intel binary — GitHub's Intel
+> macOS build runners are being retired, so the release ships Apple Silicon
+> only. The arm64 binary will **not** run on an Intel Mac; install via `pip`
+> (see below) or build one locally with `pyinstaller rfnoise.spec`.
 
 **Linux / macOS**
 
