@@ -12,7 +12,7 @@ from .engine import ConfigurationError, NoiseGenerator
 from .freq import format_freq, parse_freq
 from .model import FrequencyRange, Session
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 __all__ = [
     "FrequencyRange",
